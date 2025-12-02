@@ -1,155 +1,110 @@
-# ==============================================================================
-# SCRIPT: update-lxc.sh
-# ==============================================================================
-#
-# Questo script è progettato per automatizzare l'aggiornamento degli stack 
-# Docker Compose all'interno dei container LXC su un host Proxmox.
-#
-# La sua caratteristica principale è la sicurezza: esegue automaticamente uno 
-# snapshot Proxmox dell'LXC prima di qualsiasi aggiornamento e, in caso di 
-# successo, elimina lo snapshot, altrimenti esegue un Rollback automatico.
-#
-# Sviluppato in collaborazione con l'assistente AI Gemini.
-#
-# ==============================================================================
-# DOCUMENTAZIONE IN ITALIANO
-# ==============================================================================
-#
-# # Caratteristiche Principali
-#
-# * **Snapshot e Rollback Automatico:** Crea uno snapshot prima dell'aggiornamento e lo elimina (o esegue il rollback) in base all'esito.
-# * **Scansione Docker Compose:** Identifica automaticamente gli stack Docker Compose nella directory configurata.
-# * **Modalità  Dry Run (`--dry-run`):** Permette di simulare l'intero processo senza eseguire alcuna modifica reale.
-# * **Filtri Intelligenti:** Supporta ID LXC, nomi parziali, o la parola chiave `all` per tutti i container attivi.
-#
-# ------------------------------------------------------------------------------
-# # Configurazione Iniziale
-#
-# Prima di utilizzare lo script, assicurati che sia configurato per il tuo ambiente.
-#
-# Apri `update-lxc.sh` e modifica le seguenti variabili nella sezione `USER CONFIG`:
-#
-# | Variabile | Descrizione | Valore di Default |
-# | :--- | :--- | :--- |
-# | `SCAN_ROOT` | **Radice di Scansione:** La directory all'interno degli LXC dove lo script cercherà  i file `docker-compose.yml`. | `/root` |
-# | `DOCKGE_PATH` | **Percorso Dockge:** Il percorso specifico dello stack Dockge. Viene aggiornato per primo ed escluso dalla scansione generale. | `/root/dockge_install/dockge` |
-#
-# ### Permessi di Esecuzione
-#
-# Assicurati che lo script abbia i permessi di esecuzione:
-# ```bash
-# chmod +x update-lxc.sh
-# ```
-#
-# ------------------------------------------------------------------------------
-# # Utilizzo
-#
-# Lo script richiede uno o più identificatori LXC (ID o nome parziale) come argomento.
-#
-# ### 1. Modalità  Dry Run (Simulazione)
-#
-# Usa l'opzione `--dry-run` per visualizzare esattamente cosa farebbe lo script:
-#
-# | Comando | Descrizione |
-# | :--- | :--- |
-# | `./update-lxc.sh --dry-run 8006` | Simula l'aggiornamento solo per l'LXC ID 8006. |
-# | `./update-lxc.sh all --dry-run` | Simula l'aggiornamento per **tutti** gli LXC attivi. |
-# | `./update-lxc.sh hom --dry-run` | Simula l'aggiornamento per tutti gli LXC il cui nome hostname contiene "hom" (e.g., Homarr). |
-#
-# ### 2. Aggiornamento Reale
-#
-# Per eseguire l'aggiornamento effettivo (con creazione dello snapshot):
-#
-# | Comando | Descrizione |
-# | :--- | :--- |
-# | `./update-lxc.sh 8006 8011` | Aggiorna solo gli LXC con ID 8006 e 8011. |
-# | `./update-lxc.sh all` | **ATTENZIONE:** Aggiorna **tutti** gli LXC attivi che contengono Docker. |
-# | `./update-lxc.sh immich` | Aggiorna LXC con hostname contenente "immich". |
-#
-# ------------------------------------------------------------------------------
-# # Logica di Sicurezza e Rollback
-#
-# Ogni processo di aggiornamento segue questi passaggi garantiti:
-#
-# 1.  **Verifica Docker:** Salta l'LXC se Docker non è installato.
-# 2.  **Snapshot:** Crea uno snapshot Proxmox temporaneo. Se fallisce, il processo si interrompe.
-# 3.  **Aggiornamento Stacks:** Esegue `docker compose pull && docker compose up -d` prima su Dockge e poi su tutti gli altri stack rilevati.
-# 4.  **Valutazione Finale:**
-#     **Successo Totale:** Lo snapshot temporaneo viene **eliminato**.
-#     **Errore Rilevato:** Lo script esegue un **rollback immediato** allo snapshot iniziale e poi elimina lo snapshot.
-#
-# ==============================================================================
-# ENGLISH DOCUMENTATION
-# ==============================================================================
-#
-# The `update-lxc.sh` script is designed to automate the update of **Docker Compose** # stacks inside **LXC** containers on a **Proxmox** host.
-#
-# Its primary feature is **security**: it automatically takes a **Proxmox snapshot** # of the LXC before any update. If the update is successful, it deletes the snapshot. 
-# If the update fails, it executes an **Automatic Rollback** to the previously created 
-# restore point.
-#
-# ------------------------------------------------------------------------------
-# # Key Features
-#
-# * **Automatic Snapshot and Rollback:** Creates a snapshot before the update and deletes it (or executes a rollback) based on the result.
-# * **Docker Compose Scanning:** Automatically identifies Docker Compose stacks in the configured directory.
-# * **Dry Run Mode (`--dry-run`):** Allows you to simulate the entire process without making any real changes.
-# * **Intelligent Filtering:** Supports LXC IDs, partial names, or the keyword `all` for all active containers.
-#
-# ------------------------------------------------------------------------------
-# # Initial Configuration
-#
-# Before using the script, ensure it is configured for your environment.
-#
-# Open `update-lxc.sh` and modify the following sections in the **`USER CONFIG`** section:
-#
-# | Variable | Description | Default Value |
-# | :--- | :--- | :--- |
-# | `SCAN_ROOT` | **Scan Root:** The directory inside the LXC where the script will search for `docker-compose.yml` files. | `/root` |
-# | `DOCKGE_PATH` | **Dockge Path:** The specific path for the Dockge stack. It is updated first and excluded from the general scan. | `/root/dockge_install/dockge` |
-#
-# ### Execution Permissions
-#
-# Ensure the script has execution permissions:
-# ```bash
-# chmod +x update-lxc.sh
-# ```
-#
-# ------------------------------------------------------------------------------
-# # Usage
-#
-# The script requires one or more LXC identifiers (ID or partial name) as arguments.
-#
-# ### 1. Dry Run Mode (Simulation)
-#
-# Use the `--dry-run` option to see exactly what the script would do:
-#
-# | Command | Description |
-# | :--- | :--- |
-# | `./update-lxc.sh --dry-run 8006` | Simulates the update only for LXC ID 8006. |
-# | `./update-lxc.sh all --dry-run` | Simulates the update for **all** active LXCs. |
-# | `./update-lxc.sh hom --dry-run` | Simulates the update for all LXCs whose hostname contains "hom" (e.g., Homarr). |
-#
-# ### 2. Live Update
-#
-# To execute the actual update (with snapshot creation):
-#
-# | Command | Description |
-# | :--- | :--- |
-# | `./update-lxc.sh 8006 8011` | Updates only LXCs with ID 8006 and 8011. |
-# | `./update-lxc.sh all` | **WARNING:** Updates **all** active LXCs that contain Docker. |
-# | `./update-lxc.sh immich` | Updates LXC with hostname containing "immich". |
-#
-# ------------------------------------------------------------------------------
-# # Security and Rollback Logic
-#
-# Each update process follows these guaranteed steps:
-#
-# 1.  **Docker Check:** Skips the LXC if Docker is not installed.
-# 2.  **Snapshot:** Creates a temporary Proxmox snapshot. If it fails, the process stops.
-# 3.  **Update Stacks:** Executes `docker compose pull && docker compose up -d` first on Dockge and then on all other detected stacks.
-# 4.  **Final Assessment:**
-#     **Total Success:** The temporary snapshot is **deleted**.
-#     **Error Detected:** The script executes an **immediate rollback** to the initial snapshot and then deletes the snapshot.
-#
-# ==============================================================================
+
+# SCRIPT update-lxc.sh
+
+Script per automatizzare l'aggiornamento degli stack **Docker Compose** all'interno dei container **LXC** su un host **Proxmox**.  
+La caratteristica principale è la **sicurezza**: viene creato automaticamente uno **snapshot Proxmox** prima di ogni aggiornamento.  
+- Se l'aggiornamento ha successo -> lo snapshot viene eliminato.  
+- Se l'aggiornamento fallisce -> viene eseguito un **rollback automatico**.  
+
+Sviluppato in collaborazione con l'assistente AI Gemini.
+
+---
+
+## Caratteristiche Principali
+
+- **Snapshot e Rollback Automatico**  
+- **Scansione Docker Compose** nelle directory configurate  
+- **Modalita Dry Run (--dry-run)** per simulazioni senza modifiche reali  
+- **Filtri intelligenti**: supporta ID LXC, nomi parziali o la keyword "all"  
+
+---
+
+## Configurazione Iniziale
+
+Prima di utilizzare lo script, modifica le variabili nella sezione **USER CONFIG**:
+
+| Variabile     | Descrizione                                                                 | Default |
+|---------------|-----------------------------------------------------------------------------|---------|
+| SCAN_ROOT     | Radice di scansione: directory dove cercare i file docker-compose.yml       | /root /opt/stacks  |
+| DOCKGE_PATH   | Percorsi dello stack Dockge (aggiornato per primo ed escluso dalla scansione) | /root/dockge_install/dockge /opt/dockge |
+
+### Permessi di esecuzione
+```
+chmod +x update-lxc.sh
+```
+
+---
+
+## Utilizzo
+
+Lo script richiede uno o piu identificatori LXC (ID o nome parziale) come argomento.
+
+### 1. Modalita Dry Run (Simulazione)
+Visualizza cosa accadrebbe senza eseguire modifiche reali:
+
+| Comando | Descrizione |
+|---------|-------------|
+| ./update-lxc.sh --dry-run 8006 | Simula aggiornamento per LXC ID 8006 |
+| ./update-lxc.sh all --dry-run | Simula aggiornamento per tutti gli LXC attivi |
+| ./update-lxc.sh hom --dry-run | Simula aggiornamento per LXC con hostname contenente "hom" (es. Homarr) |
+
+### 2. Aggiornamento Reale
+Esegue l'aggiornamento con snapshot:
+
+| Comando | Descrizione |
+|---------|-------------|
+| ./update-lxc.sh 8006 8011 | Aggiorna solo gli LXC con ID 8006 e 8011 |
+| ./update-lxc.sh all | ATTENZIONE: Aggiorna tutti gli LXC attivi con Docker |
+| ./update-lxc.sh immich | Aggiorna LXC con hostname contenente "immich" |
+
+---
+
+## Logica di Sicurezza e Rollback
+
+Ogni aggiornamento segue questi passaggi:
+
+1. Verifica Docker -> se non installato, l'LXC viene saltato  
+2. Snapshot temporaneo -> se fallisce, il processo si interrompe  
+3. Aggiornamento stack -> docker compose pull && docker compose up -d  
+   - Prima Dockge  
+   - Poi tutti gli altri stack rilevati  
+4. Successo totale -> snapshot eliminato  
+   Errore rilevato -> rollback immediato allo snapshot iniziale e successiva eliminazione  
+
+---
+
+## English Documentation
+
+The update-lxc.sh script automates updating Docker Compose stacks inside LXC containers on a Proxmox host.
+
+### Key Features
+- Automatic Snapshot and Rollback  
+- Docker Compose scanning  
+- Dry Run mode (--dry-run)  
+- Intelligent filtering (IDs, partial names, all)  
+
+### Initial Configuration
+Modify in USER CONFIG:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| SCAN_ROOT | Directory inside LXC to search for docker-compose.yml | /root /opt/stacks |
+| DOCKGE_PATH | Path for Dockge stack (updated first) | /root/dockge_install/dockge /opt/dockge |
+
+### Usage
+- Dry Run: ./update-lxc.sh --dry-run 8006  
+- Live Update: ./update-lxc.sh 8006 8011  
+
+### Security and Rollback Logic
+1. Docker check  
+2. Snapshot creation  
+3. Update stacks (docker compose pull && docker compose up -d)  
+4. Success -> snapshot deleted  
+   Failure -> rollback + snapshot deletion  
+
+---
+
+## Licenza
+
+Questo script e distribuito per uso personale e amministrativo.  
+Usalo con cautela: l'opzione "all" puo modificare tutti i container attivi.
