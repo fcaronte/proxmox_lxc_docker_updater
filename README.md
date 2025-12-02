@@ -1,29 +1,29 @@
 # ==============================================================================
-# ๐ณ SCRIPT: update-lxc.sh
+# SCRIPT: update-lxc.sh
 # ==============================================================================
 #
-# Questo script รจ progettato per automatizzare l'aggiornamento degli stack 
+# Questo script è progettato per automatizzare l'aggiornamento degli stack 
 # Docker Compose all'interno dei container LXC su un host Proxmox.
 #
-# La sua caratteristica principale รจ la sicurezza: esegue automaticamente uno 
+# La sua caratteristica principale è la sicurezza: esegue automaticamente uno 
 # snapshot Proxmox dell'LXC prima di qualsiasi aggiornamento e, in caso di 
 # successo, elimina lo snapshot, altrimenti esegue un Rollback automatico.
 #
 # Sviluppato in collaborazione con l'assistente AI Gemini.
 #
 # ==============================================================================
-# ๐ฎ๐น DOCUMENTAZIONE IN ITALIANO
+# DOCUMENTAZIONE IN ITALIANO
 # ==============================================================================
 #
-# # โจ Caratteristiche Principali
+# # Caratteristiche Principali
 #
 # * **Snapshot e Rollback Automatico:** Crea uno snapshot prima dell'aggiornamento e lo elimina (o esegue il rollback) in base all'esito.
 # * **Scansione Docker Compose:** Identifica automaticamente gli stack Docker Compose nella directory configurata.
-# * **Modalitร  Dry Run (`--dry-run`):** Permette di simulare l'intero processo senza eseguire alcuna modifica reale.
+# * **Modalità  Dry Run (`--dry-run`):** Permette di simulare l'intero processo senza eseguire alcuna modifica reale.
 # * **Filtri Intelligenti:** Supporta ID LXC, nomi parziali, o la parola chiave `all` per tutti i container attivi.
 #
 # ------------------------------------------------------------------------------
-# # โ๏ธ Configurazione Iniziale
+# # Configurazione Iniziale
 #
 # Prima di utilizzare lo script, assicurati che sia configurato per il tuo ambiente.
 #
@@ -31,7 +31,7 @@
 #
 # | Variabile | Descrizione | Valore di Default |
 # | :--- | :--- | :--- |
-# | `SCAN_ROOT` | **Radice di Scansione:** La directory all'interno degli LXC dove lo script cercherร  i file `docker-compose.yml`. | `/root` |
+# | `SCAN_ROOT` | **Radice di Scansione:** La directory all'interno degli LXC dove lo script cercherà  i file `docker-compose.yml`. | `/root` |
 # | `DOCKGE_PATH` | **Percorso Dockge:** Il percorso specifico dello stack Dockge. Viene aggiornato per primo ed escluso dalla scansione generale. | `/root/dockge_install/dockge` |
 #
 # ### Permessi di Esecuzione
@@ -42,11 +42,11 @@
 # ```
 #
 # ------------------------------------------------------------------------------
-# # ๐€ Utilizzo
+# # Utilizzo
 #
-# Lo script richiede uno o piรน identificatori LXC (ID o nome parziale) come argomento.
+# Lo script richiede uno o più identificatori LXC (ID o nome parziale) come argomento.
 #
-# ### 1. Modalitร  Dry Run (Simulazione)
+# ### 1. Modalità  Dry Run (Simulazione)
 #
 # Usa l'opzione `--dry-run` per visualizzare esattamente cosa farebbe lo script:
 #
@@ -67,19 +67,19 @@
 # | `./update-lxc.sh immich` | Aggiorna LXC con hostname contenente "immich". |
 #
 # ------------------------------------------------------------------------------
-# # ๐ก๏ธ Logica di Sicurezza e Rollback
+# # Logica di Sicurezza e Rollback
 #
 # Ogni processo di aggiornamento segue questi passaggi garantiti:
 #
-# 1.  **Verifica Docker:** Salta l'LXC se Docker non รจ installato.
+# 1.  **Verifica Docker:** Salta l'LXC se Docker non è installato.
 # 2.  **Snapshot:** Crea uno snapshot Proxmox temporaneo. Se fallisce, il processo si interrompe.
 # 3.  **Aggiornamento Stacks:** Esegue `docker compose pull && docker compose up -d` prima su Dockge e poi su tutti gli altri stack rilevati.
 # 4.  **Valutazione Finale:**
-#     * โ… **Successo Totale:** Lo snapshot temporaneo viene **eliminato**.
-#     * โ **Errore Rilevato:** Lo script esegue un **rollback immediato** allo snapshot iniziale e poi elimina lo snapshot.
+#     **Successo Totale:** Lo snapshot temporaneo viene **eliminato**.
+#     **Errore Rilevato:** Lo script esegue un **rollback immediato** allo snapshot iniziale e poi elimina lo snapshot.
 #
 # ==============================================================================
-# ๐ฌ๐ง ENGLISH DOCUMENTATION
+# ENGLISH DOCUMENTATION
 # ==============================================================================
 #
 # The `update-lxc.sh` script is designed to automate the update of **Docker Compose** # stacks inside **LXC** containers on a **Proxmox** host.
@@ -89,7 +89,7 @@
 # restore point.
 #
 # ------------------------------------------------------------------------------
-# # โจ Key Features
+# # Key Features
 #
 # * **Automatic Snapshot and Rollback:** Creates a snapshot before the update and deletes it (or executes a rollback) based on the result.
 # * **Docker Compose Scanning:** Automatically identifies Docker Compose stacks in the configured directory.
@@ -97,7 +97,7 @@
 # * **Intelligent Filtering:** Supports LXC IDs, partial names, or the keyword `all` for all active containers.
 #
 # ------------------------------------------------------------------------------
-# # โ๏ธ Initial Configuration
+# # Initial Configuration
 #
 # Before using the script, ensure it is configured for your environment.
 #
@@ -116,7 +116,7 @@
 # ```
 #
 # ------------------------------------------------------------------------------
-# # ๐€ Usage
+# # Usage
 #
 # The script requires one or more LXC identifiers (ID or partial name) as arguments.
 #
@@ -141,7 +141,7 @@
 # | `./update-lxc.sh immich` | Updates LXC with hostname containing "immich". |
 #
 # ------------------------------------------------------------------------------
-# # ๐ก๏ธ Security and Rollback Logic
+# # Security and Rollback Logic
 #
 # Each update process follows these guaranteed steps:
 #
@@ -149,7 +149,7 @@
 # 2.  **Snapshot:** Creates a temporary Proxmox snapshot. If it fails, the process stops.
 # 3.  **Update Stacks:** Executes `docker compose pull && docker compose up -d` first on Dockge and then on all other detected stacks.
 # 4.  **Final Assessment:**
-#     * โ… **Total Success:** The temporary snapshot is **deleted**.
-#     * โ **Error Detected:** The script executes an **immediate rollback** to the initial snapshot and then deletes the snapshot.
+#     **Total Success:** The temporary snapshot is **deleted**.
+#     **Error Detected:** The script executes an **immediate rollback** to the initial snapshot and then deletes the snapshot.
 #
 # ==============================================================================
