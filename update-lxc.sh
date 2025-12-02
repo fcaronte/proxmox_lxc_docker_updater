@@ -2,7 +2,7 @@
 set -euo pipefail
 # =================================================================
 # SCRIPT: AGGIORNAMENTO SICURO LXC E DOCKER
-# VERSIONE 46: FINALE (Stabilità Massima + Log Dry Run Riparato)
+# VERSIONE 47: SUPPORTO MULTI-CARTELLA
 # =================================================================
 
 # --- 0. CONFIGURAZIONE DI BASE E COLORI ---
@@ -18,13 +18,16 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
 #               CONFIGURAZIONE UTENTE (USER CONFIG)
 # =================================================================
 
-# 1. RADICE DI SCANSIONE DOCKER: Directory nell'LXC dove cercare gli stack compose.
-#SCAN_ROOT="/opt/stack"
-SCAN_ROOT="/root" 
+# 1. RADICI DI SCANSIONE DOCKER (MULTI-PATH SUPPORTATO): 
+#    Directory nell'LXC dove cercare gli stack compose (separati da spazio).
+#    ESEMPIO: Se hai stack in /root e /opt:
+SCAN_ROOTS="/root /opt/stacks"
 
-# 2. PERCORSO DOCKGE (STOCK): Percorso escluso dalla scansione generale e aggiornato per primo.
-#DOCKGE_PATH="/opt/dockge"
-DOCKGE_PATH="/root/dockge_install/dockge" 
+# 2. PERCORSI DOCKGE (MULTI-PATH SUPPORTATO): 
+#    Percorsi delle installazioni di Dockge (separati da spazio).
+#    Questi vengono aggiornati per primi ed ESCLUSI dalla scansione generale.
+#    ESEMPIO: Se hai due istanze Dockge:
+DOCKGE_PATHS="/root/dockge_install/dockge /opt/dockge" 
 
 # =================================================================
 
@@ -40,14 +43,15 @@ esegui_remoto() {
     local ID=$1
     local CMD=$2
     
-    # MANTENUTA LA FORZATURA LOCALE PER FUNZIONALITÀ
+    # MANTENUTA LA FORZATURA LOCALE PER FUNZIONALIT�
     local FINAL_CMD="export LC_ALL=C.UTF-8 && $CMD"
     
     if "$DRY_RUN"; then
         echo -e "   [DRY-RUN] pct exec $ID -- bash -c \"$FINAL_CMD\""
-        return 0
+        # Usato echo per coerenza di output, ma lo status deve sempre essere 0 in Dry Run
+        return 0 
     else
-        # Esegue il comando. Si accetta il warning visibile in output, se presente.
+        # Esegue il comando e cattura lo status
         /usr/sbin/pct exec "$ID" -- bash -c "$FINAL_CMD"
     fi
 }
@@ -64,8 +68,8 @@ aggiorna_stack() {
     # Check Compose: verifica presenza del file compose.
     local CHECK_COMMAND="test -f \"$PATH_STACK/docker-compose.yml\" || test -f \"$PATH_STACK/docker-compose.yaml\" || test -f \"$PATH_STACK/compose.yml\" || test -f \"$PATH_STACK/compose.yaml\""
 
-    # Usa esegui_remoto per il check.
-    if ! esegui_remoto "$ID" "$CHECK_COMMAND"; then
+    # Usa esegui_remoto per il check. In DRY_RUN, assume successo se non fallisce subito.
+    if ! esegui_remoto "$ID" "$CHECK_COMMAND" >/dev/null 2>&1; then
         echo -e "   -> ${C_WARNING}ATTENZIONE: Nessun file compose trovato in $PATH_STACK. Stack $NOME_STACK saltato.${C_RESET}"
         return 0 
     fi
@@ -81,9 +85,11 @@ aggiorna_stack() {
     local UPDATE_COMMAND="cd \"$PATH_STACK\" && docker compose pull && docker compose up -d"
 
     # Usa esegui_remoto per l'aggiornamento.
-    esegui_remoto "$ID" "$UPDATE_COMMAND"
-    
-    EXIT_CODE=$?
+    if esegui_remoto "$ID" "$UPDATE_COMMAND"; then
+        EXIT_CODE=0
+    else
+        EXIT_CODE=$?
+    fi
 
     if [ "$EXIT_CODE" -eq 0 ]; then
         echo -e "   -> ${C_SUCCESS}$NOME_STACK aggiornato con successo.${C_RESET}"
@@ -94,7 +100,7 @@ aggiorna_stack() {
     return $EXIT_CODE 
 }
 
-# --- 1. GESTIONE DEI PARAMETRI E DELLA PAROLA CHIAVE 'ALL' ---
+# --- 1. GESTIONE DEI PARAMETRI E DELLA PAROLA CHIAVE 'ALL' (NON MODIFICATA) ---
 
 LXC_INPUT=()
 # Raccoglie i parametri, gestendo il flag --dry-run
@@ -114,7 +120,7 @@ if [ ${#LXC_INPUT[@]} -eq 0 ]; then
 fi
 
 if "$DRY_RUN"; then
-    echo -e "${C_WARNING}*** MODALITÀ DRY-RUN ATTIVA: NESSUNA MODIFICA SARÀ APPLICATA ***${C_RESET}"
+    echo -e "${C_WARNING}*** MODALIT� DRY-RUN ATTIVA: NESSUNA MODIFICA SAR� APPLICATA ***${C_RESET}"
 fi
 
 if [ "${LXC_INPUT[0]}" = "all" ]; then
@@ -151,7 +157,7 @@ else
                             MATCH_COUNT=$((MATCH_COUNT + 1))
                         else
                             NAME=$(/usr/sbin/pct config $ID | grep 'hostname' | awk '{print $2}' || echo "Sconosciuto")
-                            echo -e "${C_WARNING}Trovato LXC $ID ($NAME), ma non è in stato 'running'. Saltato.${C_RESET}"
+                            echo -e "${C_WARNING}Trovato LXC $ID ($NAME), ma non � in stato 'running'. Saltato.${C_RESET}"
                         fi
                     fi
                 done
@@ -175,7 +181,7 @@ if [ ${#LXC_IDS[@]} -eq 0 ]; then
 fi
 
 echo -e "${C_INFO}ID LXC da processare: ${LXC_IDS[@]}${C_RESET}"
-echo -e "${C_INFO}Radice di Scansione Docker: $SCAN_ROOT${C_RESET}"
+echo -e "${C_INFO}Radici di Scansione Docker: $SCAN_ROOTS${C_RESET}"
 echo "--------------------------------------------------------"
 
 # --- 3. LOOP SU OGNI CONTAINER LXC ---
@@ -185,8 +191,8 @@ for LXC_ID in "${LXC_IDS[@]}"; do
     
     # 3.0 CONTROLLO DOCKER
     if ! esegui_remoto "$LXC_ID" "which docker" >/dev/null 2>&1; then
-        echo -e "${C_WARNING}Docker non presente nel container $LXC_ID → salto.${C_RESET}"
-        REPORT+=("${C_WARNING}LXC $LXC_ID → SALTATO (Docker non presente)${C_RESET}")
+        echo -e "${C_WARNING}Docker non presente nel container $LXC_ID  salto.${C_RESET}"
+        REPORT+=("${C_WARNING}LXC $LXC_ID  SALTATO (Docker non presente)${C_RESET}")
         echo -e "${C_INFO}#### FINE PROCESSO PER LXC ID $LXC_ID ####${C_RESET}"
         echo ""
         continue
@@ -202,7 +208,7 @@ for LXC_ID in "${LXC_IDS[@]}"; do
         if ! /usr/sbin/pct snapshot "$LXC_ID" "$SNAPSHOT_NAME" --description "Snapshot prima aggiornamento Docker $LXC_ID"; then
             echo -e "${C_ERROR}ERRORE CRITICO: impossibile creare lo snapshot per LXC $LXC_ID.${C_RESET}"
             echo -e "${C_WARNING}Salto l'aggiornamento per motivi di sicurezza.${C_RESET}"
-            REPORT+=("${C_ERROR}LXC $LXC_ID → ERRORE CRITICO (Snapshot fallito)${C_RESET}")
+            REPORT+=("${C_ERROR}LXC $LXC_ID  ERRORE CRITICO (Snapshot fallito)${C_RESET}")
             echo -e "${C_INFO}#### FINE PROCESSO PER LXC ID $LXC_ID ####${C_RESET}"
             echo ""
             continue
@@ -213,45 +219,54 @@ for LXC_ID in "${LXC_IDS[@]}"; do
     # --- 3.2 ESECUZIONE AGGIORNAMENTO DOCKER (Sequenza) ---
     TOTAL_STATUS=0
     
-    # 1. Aggiorna lo Stack Dockge
-    if ! aggiorna_stack "$LXC_ID" "$DOCKGE_PATH" "Dockge"; then
-        TOTAL_STATUS=$((TOTAL_STATUS + 1))
-    fi
+    # 1. Aggiorna gli Stack Dockge (LOOP SU PERCORSI MULTIPLI)
+    for DOCKGE_PATH in $DOCKGE_PATHS; do
+        if ! aggiorna_stack "$LXC_ID" "$DOCKGE_PATH" "Dockge ($DOCKGE_PATH)"; then
+            TOTAL_STATUS=$((TOTAL_STATUS + 1))
+        fi
+    done
     
-    # 2. Scansione e Aggiornamento degli Stack Generici
-    echo -e "${C_INFO}Inizio scansione Docker Compose in $SCAN_ROOT...${C_RESET}"
+    # 2. Scansione e Aggiornamento degli Stack Generici (LOOP SU PERCORSI MULTIPLI)
+    echo -e "${C_INFO}Inizio scansione Docker Compose nei percorsi: $SCAN_ROOTS...${C_RESET}"
     
     STACKS_FOUND=()
     
-    # Scan Command 
-    SCAN_COMMAND="find \"$SCAN_ROOT\" \
-        -path \"$SCAN_ROOT/proc\" -prune -o \
-        -path \"$SCAN_ROOT/sys\" -prune -o \
-        -path \"$SCAN_ROOT/dev\" -prune -o \
-        -path \"$SCAN_ROOT/tmp\" -prune -o \
+    # Costruisci l'elenco degli esclusi (Dockge) per il comando FIND
+    EXCLUDE_DOCKGE_PATHS=""
+    for DOCKGE_PATH in $DOCKGE_PATHS; do
+        EXCLUDE_DOCKGE_PATHS+=" -path \"$DOCKGE_PATH\" -prune -o"
+    done
+    # Rimuovi lo spazio/separatore finale inutile
+    EXCLUDE_DOCKGE_PATHS=$(echo "$EXCLUDE_DOCKGE_PATHS" | xargs)
+
+    # Costruisci il comando FIND (che ora accetta pi� radici e pi� esclusioni)
+    SCAN_COMMAND="find $SCAN_ROOTS \
+        -path \"*/proc\" -prune -o \
+        -path \"*/sys\" -prune -o \
+        -path \"*/dev\" -prune -o \
+        -path \"*/tmp\" -prune -o \
+        $EXCLUDE_DOCKGE_PATHS \
         -type f \\( -name \"docker-compose.yml\" -o -name \"docker-compose.yaml\" -o -name \"compose.yml\" -o -name \"compose.yaml\" \\) -print0 2>/dev/null \
-        | xargs -0 dirname \
-        | grep -v \"$DOCKGE_PATH\" || true"
+        | xargs -0 dirname || true"
     
-    # CORREZIONE DRY-RUN: Gestione separata per evitare l'output corrotto
+    # CORREZIONE DRY-RUN
+    STACK_PATHS_OUTPUT=""
     if "$DRY_RUN"; then
         echo -e "   [DRY-RUN] PCT exec per la Scansione degli Stack (non eseguito):"
-        echo "   ${SCAN_COMMAND}"
-    
-        # Simuliamo un output vuoto in Dry Run per non avere output indesiderato
-        STACK_PATHS_OUTPUT=""
+        echo "   $SCAN_COMMAND"
     else
         # Esecuzione live
         STACK_PATHS_OUTPUT=$(esegui_remoto "$LXC_ID" "$SCAN_COMMAND")
     fi
 
     if [ -n "$STACK_PATHS_OUTPUT" ]; then
-        STACK_PATHS_OUTPUT=$(echo "$STACK_PATHS_OUTPUT" | sort -u)
+        # Normalizza e pulisce gli spazi extra dall'output
+        STACK_PATHS_OUTPUT=$(echo "$STACK_PATHS_OUTPUT" | tr ' ' '\n' | sort -u | grep -v '^\s*$' || true)
         readarray -t STACKS_FOUND <<< "$STACK_PATHS_OUTPUT"
     fi
 
     if [ ${#STACKS_FOUND[@]} -eq 0 ]; then
-        echo -e "${C_INFO}Nessun altro stack Docker Compose trovato in $SCAN_ROOT (escluso Dockge).${C_RESET}"
+        echo -e "${C_INFO}Nessun altro stack Docker Compose trovato nei percorsi specificati (esclusi Dockge).${C_RESET}"
     else
         for STACK_PATH in "${STACKS_FOUND[@]}"; do
             STACK_NAME=$(basename "$STACK_PATH")
@@ -266,26 +281,26 @@ for LXC_ID in "${LXC_IDS[@]}"; do
     # --- 3.3 GESTIONE ESITO E RIPRISTINO/PULIZIA ---
     
     if "$DRY_RUN"; then
-        REPORT+=("${C_WARNING}LXC $LXC_ID → DRY-RUN COMPLETATO (Nessuna modifica applicata)${C_RESET}")
+        REPORT+=("${C_WARNING}LXC $LXC_ID  DRY-RUN COMPLETATO (Nessuna modifica applicata)${C_RESET}")
     elif [ "$TOTAL_STATUS" -eq 0 ]; then
         echo -e "${C_SUCCESS}AGGIORNAMENTO RIUSCITO per LXC $LXC_ID.${C_RESET}"
         echo -e "${C_INFO}Rimuovo lo snapshot temporaneo $SNAPSHOT_NAME...${C_RESET}"
         /usr/sbin/pct delsnapshot "$LXC_ID" "$SNAPSHOT_NAME"
         echo -e "${C_INFO}Pulizia completata.${C_RESET}"
-        REPORT+=("${C_SUCCESS}LXC $LXC_ID → OK (Snapshot rimosso)${C_RESET}")
+        REPORT+=("${C_SUCCESS}LXC $LXC_ID  OK (Snapshot rimosso)${C_RESET}")
     else
         echo -e "${C_ERROR}ERRORE DURANTE L'AGGIORNAMENTO di LXC $LXC_ID! Codice Totale: $TOTAL_STATUS${C_RESET}"
         echo -e "${C_WARNING}Eseguo il ROLLBACK allo snapshot $SNAPSHOT_NAME...${C_RESET}"
         
         if ! /usr/sbin/pct rollback "$LXC_ID" "$SNAPSHOT_NAME"; then
             echo -e "${C_ERROR}ERRORE CRITICO: Fallito il rollback. Richiesta attenzione manuale su $LXC_ID!${C_RESET}"
-            REPORT+=("${C_ERROR}LXC $LXC_ID → ERRORE FATALE (Rollback fallito!)${C_RESET}")
+            REPORT+=("${C_ERROR}LXC $LXC_ID  ERRORE FATALE (Rollback fallito!)${C_RESET}")
         else
             echo -e "${C_SUCCESS}Ripristino LXC $LXC_ID completato. Stato precedente ripristinato.${C_RESET}"
             echo -e "${C_INFO}Rimuovo lo snapshot temporaneo $SNAPSHOT_NAME...${C_RESET}"
             /usr/sbin/pct delsnapshot "$LXC_ID" "$SNAPSHOT_NAME"
             echo -e "${C_INFO}Pulizia completata.${C_RESET}"
-            REPORT+=("${C_WARNING}LXC $LXC_ID → ROLLBACK ESEGUITO (Codice errore: $TOTAL_STATUS)${C_RESET}")
+            REPORT+=("${C_WARNING}LXC $LXC_ID  ROLLBACK ESEGUITO (Codice errore: $TOTAL_STATUS)${C_RESET}")
         fi
     fi
     echo -e "${C_INFO}#### FINE PROCESSO PER LXC ID $LXC_ID ####${C_RESET}"
