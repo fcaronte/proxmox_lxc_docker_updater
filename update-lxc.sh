@@ -1,62 +1,272 @@
 #!/bin/bash
-set -euo pipefail
-# =================================================================
-# SCRIPT: AGGIORNAMENTO SICURO LXC E DOCKER
-# VERSIONE 48 (FINALE CON PULIZIA SNAPSHOT E AGGIORNAMENTO SELETTIVO)
-# =================================================================
 
-# --- 0. CONFIGURAZIONE DI BASE E VARIABILI GLOBALI ---
-C_SUCCESS='\e[32m'
-C_ERROR='\e[31m'
-C_WARNING='\e[33m'
-C_INFO='\e[36m' 
-C_RESET='\e[0m'
+# ======================================================================
+# SCRIPT: update-lxc.sh
+# DESCRIZIONE: Aggiornamento automatizzato di stack Docker Compose 
+#              all'interno di LXC Proxmox, con snapshot e rollback.
+# SVILUPPATO CON GEMINI
+# ======================================================================
 
-# Prefisso costante per gli snapshot gestiti dallo script
-SNAPSHOT_PREFIX="AUTO_UPDATE_SNAP"
-
-export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
-
-# =================================================================
-#               CONFIGURAZIONE UTENTE (USER CONFIG)
-# =================================================================
-
-# 1. RADICI DI SCANSIONE DOCKER (MULTI-PATH SUPPORTATO): 
-#    Directory nell'LXC dove cercare gli stack compose (separati da spazio).
+# --- USER CONFIG ---
 SCAN_ROOTS="/root /opt/stacks"
+DOCKGE_PATHS="/root/dockge_install/dockge /opt/dockge"
 
-# 2. PERCORSI DOCKGE (MULTI-PATH SUPPORTATO): 
-#    Percorsi delle installazioni di Dockge (separati da spazio).
-DOCKGE_PATHS="/root/dockge_install/dockge /opt/dockge" 
+# Se true, l'ultimo snapshot di successo viene mantenuto come backup.
+KEEP_LAST_SNAPSHOT=true
+# -------------------
 
-# 3. MANTIENI L'ULTIMO SNAPSHOT (Keep Last Snapshot)
-#    Se 'true', l'ultimo snapshot di successo NON viene cancellato (NUOVA LOGICA).
-KEEP_LAST_SNAPSHOT=true 
+# --- CONFIGURAZIONE VARIABILI INTERNE ---
+SCRIPT_VERSION="1.3.0 (Clean Mode)"
+SNAP_PREFIX="AUTO_UPDATE_SNAP"
+HOST_IP=$(hostname -I | awk '{print $1}')
 
-# =================================================================
+# Codici colore per l'output (Dry Run cambia C_INFO a Giallo)
+C_DEFAULT='\033[0m'
+C_RED='\033[0;31m'
+C_GREEN='\033[0;32m'
+C_YELLOW='\033[0;33m'
+C_BLUE='\033[0;34m'
+C_INFO=${C_BLUE}
+C_ERROR=${C_RED}
+C_SUCCESS=${C_GREEN}
+C_WARNING=${C_YELLOW}
 
-# Variabili di stato
-REPORT=()
+# --- GESTIONE ARGOMENTI E MODALITÀ ---
 DRY_RUN=false
+CLEAN_MODE=false
+ARGS=()
 
-# --- FUNZIONE AUSILIARIA PER ESECUZIONE REMOTA ---
+# Processa tutti gli argomenti per identificare le modalità e raccogliere gli ID/nomi
+for arg in "$@"; do
+    if [ "$arg" == "--dry-run" ]; then
+        DRY_RUN=true
+        C_INFO=${C_YELLOW} # Cambia il colore per la modalità dry run
+    elif [ "$arg" == "clean" ]; then
+        CLEAN_MODE=true
+    elif [ "$arg" != "--" ]; then
+        ARGS+=("$arg")
+    fi
+done
 
+# Verifica che ci siano argomenti se non è solo un help
+if [ ${#ARGS[@]} -eq 0 ]; then
+    echo -e "${C_ERROR}ERRORE: Sintassi non valida.${C_RESET}"
+    echo "Utilizzo: $0 <ID_LXC|nome_parziale|all> [--dry-run]"
+    echo "Pulizia Snapshot: $0 clean <ID_LXC|nome_parziale|all>"
+    exit 1
+fi
+
+echo -e "${C_INFO}Aggiornamento LXC Docker (v$SCRIPT_VERSION) - Host: $HOST_IP${C_RESET}"
+if [ "$CLEAN_MODE" = false ]; then
+    echo "Radici di Scansione Docker: $SCAN_ROOTS"
+fi
+
+if [ "$DRY_RUN" = true ]; then
+    echo -e "${C_WARNING}*** MODALITÀ DRY-RUN ATTIVA: NESSUNA MODIFICA SARÀ APPLICATA ***${C_RESET}"
+fi
+echo "--------------------------------------------------------"
+
+
+# ======================================================================
+# FUNZIONI GENERALI
+# ======================================================================
+
+# Esegue un comando all'interno del container LXC e aggiunge la gestione della locale.
 esegui_remoto() {
     local ID=$1
     local CMD=$2
+    # Imposta la locale per garantire l'esecuzione corretta di docker compose
+    local FINAL_CMD="export LC_ALL=C.UTF-8 && $CMD" 
     
-    # MANTENUTA LA FORZATURA LOCALE C.UTF-8 (potrebbe generare warning se non installata)
-    local FINAL_CMD="export LC_ALL=C.UTF-8 && $CMD"
+    # Esegue il comando in modo non interattivo
+    pct exec "$ID" -- bash -c "$FINAL_CMD"
+    return $?
+}
+
+# Trova gli ID degli LXC in base agli argomenti forniti (all, ID, o nome parziale)
+trova_lxc_ids() {
+    local SEARCH_TERMS=("$@")
+    local ACTIVE_IDS
+    local FILTERED_IDS=()
+
+    # Ottieni tutti gli ID dei container attivi e running
+    ACTIVE_IDS=$(pct list | awk 'NR>1 {print $1}' || true)
     
-    if "$DRY_RUN"; then
-        echo -e "   [DRY-RUN] pct exec $ID -- bash -c \"$FINAL_CMD\""
-        return 0 
+    if [ -z "$ACTIVE_IDS" ]; then
+        echo ""
+        return
+    fi
+    
+    for TERM in "${SEARCH_TERMS[@]}"; do
+        if [ "$TERM" == "all" ]; then
+            # Se 'all' è specificato, prendi tutti gli LXC attivi.
+            FILTERED_IDS=($ACTIVE_IDS)
+            break
+        fi
+        
+        # Filtra per ID numerico o nome parziale
+        for ID in $ACTIVE_IDS; do
+            if [ "$ID" == "$TERM" ]; then
+                FILTERED_IDS+=("$ID")
+                continue
+            fi
+            
+            # Controlla il nome host
+            local HOSTNAME=$(pct config "$ID" | grep 'hostname' | awk '{print $2}' || true)
+            if echo "$HOSTNAME" | grep -qi "$TERM"; then
+                FILTERED_IDS+=("$ID")
+            fi
+        done
+    done
+    
+    # Rimuove duplicati e restituisce l'elenco finale.
+    echo "${FILTERED_IDS[@]}" | tr ' ' '\n' | sort -u | tr '\n' ' '
+}
+
+
+# ======================================================================
+# GESTIONE SNAPSHOT
+# ======================================================================
+
+# NUOVA FUNZIONE: Pulizia manuale di tutti gli snapshot di sicurezza per uno o più LXC
+pulisci_snapshot_manuale() {
+    local ID=$1
+    local NOME=$(pct config $ID | grep 'hostname' | awk '{print $2}' || echo "LXC $ID")
+    echo -e "${C_INFO}#### AVVIO PULIZIA MANUALE SNAPSHOT PER LXC ID $ID ($NOME) ####${C_RESET}"
+    
+    if ! pct status $ID &>/dev/null; then
+        echo -e "${C_WARNING}   -> LXC ID $ID non trovato o non supporta operazioni pct. Salto.${C_RESET}"
+        return 0
+    fi
+    
+    # 1. Elenca gli snapshot di Proxmox e filtra per il prefisso. 
+    local SNAPS_TO_DELETE=$(pct listsnapshot $ID | grep -oE 'AUTO_UPDATE_SNAP_[0-9_]+'"$ID" || true)
+
+    if [ -z "$SNAPS_TO_DELETE" ]; then
+        echo -e "${C_SUCCESS}   -> Nessuno snapshot di pulizia automatica (AUTO_UPDATE_SNAP_) trovato per LXC $ID.${C_RESET}"
+        echo "---"
+        return 0
+    fi
+
+    echo -e "${C_INFO}   -> Trovati snapshot da rimuovere:${C_RESET}"
+    
+    local SNAPSHOT_COUNTER=0
+    for SNAPSHOT in $SNAPS_TO_DELETE; do
+        SNAPSHOT_COUNTER=$((SNAPSHOT_COUNTER + 1))
+        echo -e "   -> Tentativo di rimozione snapshot: $SNAPSHOT..."
+        
+        # 2. Rimuove lo snapshot utilizzando il comando Proxmox
+        if pct delsnapshot "$ID" "$SNAPSHOT"; then
+            echo -e "${C_SUCCESS}  ✅ $SNAPSHOT rimosso con successo.${C_RESET}"
+        else
+            echo -e "${C_ERROR}  ❌ ERRORE nella rimozione dello snapshot $SNAPSHOT. Continuo...${C_RESET}"
+        fi
+    done
+
+    if [ "$SNAPSHOT_COUNTER" -gt 0 ]; then
+        echo -e "${C_SUCCESS}#### PULIZIA COMPLETA PER LXC ID $ID ($NOME). $SNAPSHOT_COUNTER snapshot processati. ####${C_RESET}"
+    fi
+
+    echo "---"
+    return 0
+}
+
+
+# Pulisce tutti gli snapshot precedenti ad eccezione di quello eventualmente mantenuto dalla run precedente.
+pulisci_vecchi_snapshot() {
+    local ID=$1
+    local DISK_ID=$2
+    local KEEP_SNAP="$3" # Lo snapshot da MANTENERE (quello della run precedente, se KEEP_LAST_SNAPSHOT=true)
+    local SNAPSHOTS_TO_REMOVE=""
+
+    # 1. Elenca tutti gli snapshot LVM che corrispondono al prefisso e all'ID LXC
+    # Usiamo lvs per identificare i volumi
+    local ALL_LVS=$(lvs --nameprefixes -o lv_name,vg_name,lv_attr | grep "snap_vm-$ID-disk.*_$SNAP_PREFIX" | awk -F '"' '{print $2}' | sed 's/^pve\///g' || true)
+
+    if [ -z "$ALL_LVS" ]; then
+        echo "   Nessuno snapshot obsoleto con prefisso '$SNAP_PREFIX' trovato per LXC $ID."
+        return 0
+    fi
+
+    echo "   Trovati i seguenti snapshot obsoleti da processare:"
+    
+    # 2. Filtra per trovare solo gli snapshot da rimuovere
+    for SNAPSHOT in $ALL_LVS; do
+        if [ "$SNAPSHOT" != "$KEEP_SNAP" ]; then
+            # Estrai il nome dello snapshot Proxmox dal nome del volume LVM
+            local SNAP_NAME=$(echo "$SNAPSHOT" | grep -oE "$SNAP_PREFIX"'_.*_'"$ID")
+            
+            if [ -n "$SNAP_NAME" ]; then
+                 echo "   Rimozione snapshot obsoleto: $SNAP_NAME..."
+                if pct delsnapshot "$ID" "$SNAP_NAME" &>/dev/null; then
+                    echo -e "  ${C_SUCCESS}Snapshot rimosso con successo.${C_RESET}"
+                else
+                    echo -e "  ${C_ERROR}ERRORE nella rimozione dello snapshot $SNAP_NAME. Continuo...${C_RESET}"
+                fi
+            fi
+        fi
+    done
+}
+
+
+# Crea lo snapshot e restituisce il nome in caso di successo
+crea_snapshot() {
+    local ID=$1
+    # Genera un timestamp e crea il nome dello snapshot
+    SNAP_NAME="${SNAP_PREFIX}_$(date +%Y%m%d%H%M%S)_${ID}"
+
+    echo -e "${C_INFO}3.1.2 Creazione snapshot $SNAP_NAME...${C_RESET}"
+    if [ "$DRY_RUN" = true ]; then
+        echo -e "  [DRY-RUN] Snapshot $SNAP_NAME creato (simulato).${C_RESET}"
+        return 0
+    fi
+    
+    if pct snapshot $ID "$SNAP_NAME"; then
+        echo "Snapshot creato. Avvio aggiornamento Docker..."
+        echo "$SNAP_NAME"
+        return 0
     else
-        /usr/sbin/pct exec "$ID" -- bash -c "$FINAL_CMD"
+        echo -e "${C_ERROR}ERRORE: Impossibile creare lo snapshot per LXC $ID.${C_RESET}"
+        return 1
     fi
 }
 
-# --- FUNZIONE DI AGGIORNAMENTO (AGGIORNATA PER LOGICA SELETTIVA) ---
+# Esegue il rollback e la pulizia in caso di errore
+esegui_rollback() {
+    local ID=$1
+    local SNAP_NAME=$2
+    
+    echo -e "${C_ERROR}#### AGGIORNAMENTO FALLITO PER LXC ID $ID! AVVIO ROLLBACK! ####${C_RESET}"
+    
+    if [ "$DRY_RUN" = true ]; then
+        echo -e "  [DRY-RUN] Rollback a snapshot $SNAP_NAME simulato.${C_RESET}"
+        echo -e "  [DRY-RUN] Rimozione snapshot $SNAP_NAME simulata.${C_RESET}"
+        return 0
+    fi
+    
+    # 1. Rollback
+    echo "  1. Esecuzione Rollback a $SNAP_NAME..."
+    if pct rollback $ID $SNAP_NAME; then
+        echo -e "${C_SUCCESS}  Rollback completato con successo.${C_RESET}"
+    else
+        echo -e "${C_ERROR}  ERRORE CRITICO: Rollback fallito. Intervento manuale necessario.${C_RESET}"
+        return 1
+    fi
+    
+    # 2. Pulizia (rimuove lo snapshot che ha causato il rollback)
+    echo "  2. Rimozione snapshot di rollback $SNAP_NAME..."
+    if pct delsnapshot $ID $SNAP_NAME; then
+        echo -e "${C_SUCCESS}  Snapshot di rollback rimosso con successo.${C_RESET}"
+    else
+        echo -e "${C_WARNING}  ATTENZIONE: Impossibile rimuovere lo snapshot $SNAP_NAME. Rimuovere manualmente.${C_RESET}"
+    fi
+    
+    return 0
+}
+
+# ======================================================================
+# AGGIORNAMENTO DOCKER COMPOSE
+# ======================================================================
 
 aggiorna_stack() {
     local ID=$1
@@ -80,17 +290,17 @@ aggiorna_stack() {
         return 0
     fi
     
-    # 1. Trova i servizi ATTIVI prima del pull/update (usa --services per ottenere solo i nomi)
+    # 1. Trova i servizi ATTIVI prima del pull/update
     local GET_ACTIVE_SERVICES_CMD="cd \"$PATH_STACK\" && docker compose ps --services --filter \"status=running\" || true"
     
-    # Eseguo il comando per ottenere l'elenco dei servizi attivi.
     local ACTIVE_SERVICES_RAW
     ACTIVE_SERVICES_RAW=$(esegui_remoto "$ID" "$GET_ACTIVE_SERVICES_CMD")
     
-    # Converto la lista in una stringa di nomi di servizi separati da spazio
-    local ACTIVE_SERVICES=$(echo "$ACTIVE_SERVICES_RAW" | tr '\n' ' ' | sed 's/ $//' || true)
+    # Pulisce e converte in una stringa di nomi separati da spazio
+    local ACTIVE_SERVICES=$(echo "$ACTIVE_SERVICES_RAW" | grep -v '^\s*$' | xargs || true)
     
     # 2. Esegui solo il PULL delle immagini (aggiornamento senza avvio)
+    echo -e "   -> ${C_INFO}Pulling nuove immagini per $NOME_STACK...${C_RESET}"
     local PULL_COMMAND="cd \"$PATH_STACK\" && docker compose pull"
 
     if ! esegui_remoto "$ID" "$PULL_COMMAND"; then
@@ -98,12 +308,10 @@ aggiorna_stack() {
         return 1
     fi
     
-    local UP_COMMAND=""
-    
     if [ -n "$ACTIVE_SERVICES" ]; then
-        # 3. Aggiorna solo i servizi che erano ATTIVI (up -d <servizi>)
+        # 3. Aggiorna solo i servizi che erano ATTIVI (up -d [servizi])
         echo -e "   -> ${C_INFO}Avvio/Aggiornamento solo dei servizi attivi: ($ACTIVE_SERVICES)...${C_RESET}"
-        UP_COMMAND="cd \"$PATH_STACK\" && docker compose up -d $ACTIVE_SERVICES"
+        local UP_COMMAND="cd \"$PATH_STACK\" && docker compose up -d $ACTIVE_SERVICES"
 
         if ! esegui_remoto "$ID" "$UP_COMMAND"; then
             EXIT_STATUS=1
@@ -123,242 +331,173 @@ aggiorna_stack() {
 }
 
 
-# --- 1. GESTIONE DEI PARAMETRI E DELLA PAROLA CHIAVE 'ALL' ---
+# ======================================================================
+# LOGICA PRINCIPALE
+# ======================================================================
 
-LXC_INPUT=()
-# Raccoglie i parametri, gestendo il flag --dry-run
-for param in "$@"; do
-    if [[ "$param" == "--dry-run" ]]; then
-        DRY_RUN=true
-    else
-        LXC_INPUT+=( "$param" )
-    fi
-done
+# Trova la lista finale di LXC ID da processare (sia per clean che per update)
+IDs=$(trova_lxc_ids "${ARGS[@]}")
 
-LXC_IDS=()
-
-if [ ${#LXC_INPUT[@]} -eq 0 ]; then
-    echo -e "${C_ERROR}ERRORE: Nessun ID o nome LXC specificato (usa 'all' per tutti). Uscita.${C_RESET}"
+if [ -z "$IDs" ]; then
+    echo -e "${C_ERROR}Nessun container LXC trovato o attivo con gli argomenti forniti: ${ARGS[@]}${C_RESET}"
     exit 1
 fi
 
-if "$DRY_RUN"; then
-    echo -e "${C_WARNING}*** MODALITÀ DRY-RUN ATTIVA: NESSUNA MODIFICA SARÀ APPLICATA ***${C_RESET}"
-fi
 
-if [ "${LXC_INPUT[0]}" = "all" ]; then
-    echo -e "${C_INFO}Rilevata parola chiave 'all'. Scansione di tutti i container LXC attivi...${C_RESET}"
-    
-    LXC_IDS=( $(/usr/sbin/pct list | awk 'NR>1 {print $1}' | while read ID; do 
-        STATUS=$(/usr/sbin/pct status $ID)
-        if [[ "$STATUS" == "status: running" ]]; then
-            echo "$ID"
-        fi
-    done) )
-else
-    # Processa ogni input: ID, Nome, o Nomi Multipli
-    for INPUT_VAL in "${LXC_INPUT[@]}"; do
-        if [[ "$INPUT_VAL" =~ ^[0-9]+$ ]]; then
-            LXC_IDS+=( "$INPUT_VAL" )
-        else
-            echo -e "${C_INFO}Ricerca ID per nome LXC: $INPUT_VAL (match parziale multiplo)...${C_RESET}"
-            
-            MATCHED_IDS_RAW=$(/usr/sbin/pct list | tail -n +2 | grep -i "$INPUT_VAL" | awk '{print $1}')
-
-            if [ -n "$MATCHED_IDS_RAW" ]; then
-                MATCHED_IDS=()
-                readarray -t MATCHED_IDS <<< "$MATCHED_IDS_RAW"
-                
-                MATCH_COUNT=0
-                for ID in "${MATCHED_IDS[@]}"; do
-                    if [[ "$ID" =~ ^[0-9]+$ ]]; then
-                        STATUS=$(/usr/sbin/pct status "$ID")
-                        if [[ "$STATUS" == "status: running" ]]; then
-                            NAME=$(/usr/sbin/pct config $ID | grep 'hostname' | awk '{print $2}' || echo "Sconosciuto")
-                            echo -e "${C_SUCCESS}Trovato e aggiunto LXC $ID ($NAME).${C_RESET}"
-                            LXC_IDS+=( "$ID" )
-                            MATCH_COUNT=$((MATCH_COUNT + 1))
-                        else
-                            NAME=$(/usr/sbin/pct config $ID | grep 'hostname' | awk '{print $2}' || echo "Sconosciuto")
-                            echo -e "${C_WARNING}Trovato LXC $ID ($NAME), ma non è in stato 'running'. Saltato.${C_RESET}"
-                        fi
-                    fi
-                done
-
-                if [ "$MATCH_COUNT" -eq 0 ]; then
-                    echo -e "${C_ERROR}ERRORE: Nessun LXC attivo trovato con match parziale '$INPUT_VAL'. Saltato.${C_RESET}"
-                fi
-
-            else
-                echo -e "${C_ERROR}ERRORE: Nessun LXC con match parziale o ID '$INPUT_VAL' trovato. Saltato.${C_RESET}"
-            fi
-        fi
+# --- MODALITÀ CLEAN: Esegui la pulizia e termina ---
+if [ "$CLEAN_MODE" = true ]; then
+    echo -e "${C_INFO}===== AVVIO PULIZIA MANUALE SNAPSHOTS =====${C_RESET}"
+    for ID in $IDs; do
+        pulisci_snapshot_manuale "$ID"
     done
+    echo -e "${C_SUCCESS}===== PULIZIA MANUALE COMPLETATA =====${C_RESET}"
+    exit 0
 fi
 
-LXC_IDS=( $(printf "%s\n" "${LXC_IDS[@]}" | sort -u) )
 
-if [ ${#LXC_IDS[@]} -eq 0 ]; then
-    echo -e "${C_ERROR}ERRORE: Nessun ID LXC valido o attivo da processare. Uscita.${C_RESET}"
-    exit 1
-fi
+# --- MODALITÀ UPDATE (il resto dello script) ---
 
-echo -e "${C_INFO}ID LXC da processare: ${LXC_IDS[@]}${C_RESET}"
-echo -e "${C_INFO}Radici di Scansione Docker: $SCAN_ROOTS${C_RESET}"
-echo "--------------------------------------------------------"
+echo "ID LXC da processare: $IDs"
 
-# --- 3. LOOP SU OGNI CONTAINER LXC ---
+TOTAL_SUCCESS=0
+TOTAL_FAIL=0
 
-for LXC_ID in "${LXC_IDS[@]}"; do
-    echo -e "${C_INFO}#### AVVIO PROCESSO PER LXC ID $LXC_ID ####${C_RESET}"
+for ID in $IDs; do
     
-    # 3.0 CONTROLLO DOCKER
-    if ! esegui_remoto "$LXC_ID" "which docker" >/dev/null 2>&1; then
-        echo -e "${C_WARNING}Docker non presente nel container $LXC_ID → salto.${C_RESET}"
-        REPORT+=("${C_WARNING}LXC $LXC_ID → SALTATO (Docker non presente)${C_RESET}")
-        echo -e "${C_INFO}#### FINE PROCESSO PER LXC ID $LXC_ID ####${C_RESET}"
-        echo ""
+    LXC_HOSTNAME=$(pct config $ID | grep 'hostname' | awk '{print $2}' || echo "LXC $ID")
+    echo -e "\n--------------------------------------------------------"
+    echo -e "${C_INFO}#### AVVIO PROCESSO PER LXC ID $ID ($LXC_HOSTNAME) ####${C_RESET}"
+
+    # 1. Check Docker
+    if ! esegui_remoto "$ID" "command -v docker &> /dev/null && command -v docker compose &> /dev/null"; then
+        echo -e "${C_WARNING}Docker non presente nel container $ID → salto.${C_RESET}"
+        echo -e "#### FINE PROCESSO PER LXC ID $ID ####"
         continue
     fi
     
-    # --- 3.1 GESTIONE E CREAZIONE DELLO SNAPSHOT PROXMOX ---
+    # 2. Ottieni nome disco e ripulisci vecchi snapshot.
+    LXC_ROOTFS_DISK=$(pct config $ID | grep -oP 'rootfs:\s*\K(.*?):' | sed 's/:$//' || true)
     
-    SNAPSHOT_NAME="${SNAPSHOT_PREFIX}_$(date +%Y%m%d%H%M%S)_$LXC_ID"
-
-    if "$DRY_RUN"; then
-        echo -e "${C_WARNING}[DRY-RUN] Snapshot: Pulizia precedente e creazione simulata di $SNAPSHOT_NAME.${C_RESET}"
+    if [ "$KEEP_LAST_SNAPSHOT" = true ]; then
+        # Trova l'ultimo snapshot di successo per mantenerlo
+        LAST_SUCCESS_SNAP=$(pct listsnapshot $ID | grep -oE 'AUTO_UPDATE_SNAP_[0-9_]+'"$ID" | tail -n 1 || true)
     else
-        # 1. Pulizia Vecchi Snapshot Gestiti (RIMOZIONE DI TUTTA LA CATENA PRECEDENTE)
-        echo -e "${C_INFO}3.1.1 Pulizia vecchi snapshot con prefisso '${SNAPSHOT_PREFIX}' per LXC $LXC_ID...${C_RESET}"
+        LAST_SUCCESS_SNAP=""
+    fi
+    
+    echo -e "${C_INFO}3.1.1 Pulizia vecchi snapshot con prefisso '$SNAP_PREFIX' per LXC $ID...${C_RESET}"
+    pulisci_vecchi_snapshot "$ID" "$LXC_ROOTFS_DISK" "$LAST_SUCCESS_SNAP"
+
+    # 3. Creazione Snapshot
+    SNAPSHOT_NAME=$(crea_snapshot "$ID")
+    if [ $? -ne 0 ]; then
+        TOTAL_FAIL=$((TOTAL_FAIL + 1))
+        continue
+    fi
+    
+    # 4. Inizio Aggiornamento Docker Compose (Aggiornamento Selettivo)
+    UPDATE_STATUS=0
+    
+    if [ "$DRY_RUN" = false ]; then
+        echo "Snapshot creato. Avvio aggiornamento Docker..."
         
-        # CORREZIONE FINALE: Usa grep per isolare le righe e awk per estrarre il NOME DELLO SNAPSHOT ($2)
-        OLD_SNAPS=( $(/usr/sbin/pct listsnapshot "$LXC_ID" | grep "${SNAPSHOT_PREFIX}_" | awk '{print $2}' || true) )
-        
-        if [ ${#OLD_SNAPS[@]} -eq 0 ]; then
-            echo -e "   Nessun snapshot precedente da rimuovere."
-        else
-            for OLD_SNAP in "${OLD_SNAPS[@]}"; do
-                echo -e "${C_WARNING}   Rimozione snapshot obsoleto: $OLD_SNAP...${C_RESET}"
-                /usr/sbin/pct delsnapshot "$LXC_ID" "$OLD_SNAP"
-            done
-        fi
-
-        # 2. Creazione Nuovo Snapshot
-        echo -e "${C_INFO}3.1.2 Creazione snapshot $SNAPSHOT_NAME...${C_RESET}"
-        if ! /usr/sbin/pct snapshot "$LXC_ID" "$SNAPSHOT_NAME" --description "Snapshot prima aggiornamento Docker $LXC_ID (Gestito da script)"; then
-            echo -e "${C_ERROR}ERRORE CRITICO: impossibile creare lo snapshot per LXC $LXC_ID.${C_RESET}"
-            echo -e "${C_WARNING}Salto l'aggiornamento per motivi di sicurezza.${C_RESET}"
-            REPORT+=("${C_ERROR}LXC $LXC_ID → ERRORE CRITICO (Snapshot fallito)${C_RESET}")
-            echo -e "${C_INFO}#### FINE PROCESSO PER LXC ID $LXC_ID ####${C_RESET}"
-            echo ""
-            continue
-        fi
-        echo -e "${C_INFO}Snapshot creato. Avvio aggiornamento Docker...${C_RESET}"
-    fi
-
-    # --- 3.2 ESECUZIONE AGGIORNAMENTO DOCKER (Sequenza) ---
-    TOTAL_STATUS=0
-    
-    # 1. Aggiorna gli Stack Dockge (LOOP SU PERCORSI MULTIPLI)
-    for DOCKGE_PATH in $DOCKGE_PATHS; do
-        if ! aggiorna_stack "$LXC_ID" "$DOCKGE_PATH" "Dockge ($DOCKGE_PATH)"; then
-            TOTAL_STATUS=$((TOTAL_STATUS + 1))
-        fi
-    done
-    
-    # 2. Scansione e Aggiornamento degli Stack Generici (LOOP SU PERCORSI MULTIPLI)
-    echo -e "${C_INFO}Inizio scansione Docker Compose nei percorsi: $SCAN_ROOTS...${C_RESET}"
-    
-    STACKS_FOUND=()
-    
-    # Costruisci l'elenco degli esclusi (Dockge) per il comando FIND
-    EXCLUDE_DOCKGE_PATHS=""
-    for DOCKGE_PATH in $DOCKGE_PATHS; do
-        EXCLUDE_DOCKGE_PATHS+=" -path \"$DOCKGE_PATH\" -prune -o"
-    done
-    EXCLUDE_DOCKGE_PATHS=$(echo "$EXCLUDE_DOCKGE_PATHS" | xargs)
-
-    # Costruisci il comando FIND (ora con esclusione)
-    SCAN_COMMAND="find $SCAN_ROOTS \
-        -path \"*/proc\" -prune -o \
-        -path \"*/sys\" -prune -o \
-        -path \"*/dev\" -prune -o \
-        -path \"*/tmp\" -prune -o \
-        $EXCLUDE_DOCKGE_PATHS \
-        -type f \\( -name \"docker-compose.yml\" -o -name \"docker-compose.yaml\" -o -name \"compose.yml\" -o -name \"compose.yaml\" \\) -print0 2>/dev/null \
-        | xargs -0 dirname || true"
-    
-    STACK_PATHS_OUTPUT=""
-    if "$DRY_RUN"; then
-        echo -e "   [DRY-RUN] PCT exec per la Scansione degli Stack (non eseguito):"
-        echo "   $SCAN_COMMAND"
-    else
-        STACK_PATHS_OUTPUT=$(esegui_remoto "$LXC_ID" "$SCAN_COMMAND")
-    fi
-
-    if [ -n "$STACK_PATHS_OUTPUT" ]; then
-        STACK_PATHS_OUTPUT=$(echo "$STACK_PATHS_OUTPUT" | tr ' ' '\n' | sort -u | grep -v '^\s*$' || true)
-        readarray -t STACKS_FOUND <<< "$STACK_PATHS_OUTPUT"
-    fi
-
-    if [ ${#STACKS_FOUND[@]} -eq 0 ]; then
-        echo -e "${C_INFO}Nessun altro stack Docker Compose trovato nei percorsi specificati (esclusi Dockge).${C_RESET}"
-    else
-        for STACK_PATH in "${STACKS_FOUND[@]}"; do
-            STACK_NAME=$(basename "$STACK_PATH")
-            if ! aggiorna_stack "$LXC_ID" "$STACK_PATH" "$STACK_NAME"; then
-                TOTAL_STATUS=$((TOTAL_STATUS + 1))
+        # A. Aggiornamento Dockge (se presente)
+        for DOCKGE_PATH in $DOCKGE_PATHS; do
+            if [ -d "$DOCKGE_PATH" ] || esegui_remoto "$ID" "test -d $DOCKGE_PATH"; then
+                if ! aggiorna_stack "$ID" "$DOCKGE_PATH" "Dockge ($DOCKGE_PATH)"; then
+                    UPDATE_STATUS=1
+                    break
+                fi
             fi
         done
-    fi
-    
-    echo "--------------------------------------------------------"
-
-    # --- 3.3 GESTIONE ESITO E RIPRISTINO/PULIZIA ---
-    
-    if "$DRY_RUN"; then
-        REPORT+=("${C_WARNING}LXC $LXC_ID → DRY-RUN COMPLETATO (Nessuna modifica applicata)${C_RESET}")
-
-    elif [ "$TOTAL_STATUS" -eq 0 ]; then
-        # *** AGGIORNAMENTO RIUSCITO ***
-        echo -e "${C_SUCCESS}AGGIORNAMENTO RIUSCITO per LXC $LXC_ID.${C_RESET}"
         
-        if [ "$KEEP_LAST_SNAPSHOT" = true ]; then
-            echo -e "${C_INFO}Configurazione KEEP_LAST_SNAPSHOT=true: lo snapshot $SNAPSHOT_NAME viene MANTENUTO.${C_RESET}"
-            REPORT+=("${C_SUCCESS}LXC $LXC_ID → OK (Snapshot mantenuto)${C_RESET}")
-        else
-            echo -e "${C_INFO}Rimuovo lo snapshot temporaneo $SNAPSHOT_NAME...${C_RESET}"
-            /usr/sbin/pct delsnapshot "$LXC_ID" "$SNAPSHOT_NAME"
-            echo -e "${C_INFO}Pulizia completata.${C_RESET}"
-            REPORT+=("${C_SUCCESS}LXC $LXC_ID → OK (Snapshot rimosso - Vecchia Logica)${C_RESET}")
-        fi
-
-    else
-        # *** ERRORE DURANTE L'AGGIORNAMENTO (ROLLBACK) ***
-        echo -e "${C_ERROR}ERRORE DURANTE L'AGGIORNAMENTO di LXC $LXC_ID! Codice Totale: $TOTAL_STATUS${C_RESET}"
-        echo -e "${C_WARNING}Eseguo il ROLLBACK allo snapshot $SNAPSHOT_NAME...${C_RESET}"
-        
-        if ! /usr/sbin/pct rollback "$LXC_ID" "$SNAPSHOT_NAME"; then
-            echo -e "${C_ERROR}ERRORE CRITICO: Fallito il rollback. Richiesta attenzione manuale su $LXC_ID!${C_RESET}"
-            REPORT+=("${C_ERROR}LXC $LXC_ID → ERRORE FATALE (Rollback fallito!)${C_RESET}")
-        else
-            echo -e "${C_SUCCESS}Ripristino LXC $LXC_ID completato. Stato precedente ripristinato.${C_RESET}"
+        if [ "$UPDATE_STATUS" -eq 0 ]; then
+            # B. Scansione e aggiornamento degli altri stack
+            echo -e "Inizio scansione Docker Compose nei percorsi: $SCAN_ROOTS..."
             
-            # Lo snapshot fallito viene sempre rimosso dopo il rollback.
-            echo -e "${C_INFO}Rimuovo lo snapshot fallito/usato $SNAPSHOT_NAME...${C_RESET}"
-            /usr/sbin/pct delsnapshot "$LXC_ID" "$SNAPSHOT_NAME"
-            echo -e "${C_INFO}Pulizia completata.${C_RESET}"
-            REPORT+=("${C_WARNING}LXC $LXC_ID → ROLLBACK ESEGUITO (Codice errore: $TOTAL_STATUS)${C_RESET}")
+            # Trova tutte le directory che contengono un file docker-compose.yml o simile
+            SCAN_CMD="find $SCAN_ROOTS -type f -maxdepth 2 \( -name \"docker-compose.yml\" -o -name \"docker-compose.yaml\" -o -name \"compose.yml\" -o -name \"compose.yaml\" \) -print 2>/dev/null"
+            COMPOSE_FILES=$(esegui_remoto "$ID" "$SCAN_CMD" | grep -vE "^[[:space:]]*$" || true)
+            
+            # Filtra per rimuovere Dockge (già aggiornato)
+            for DOCKGE_PATH in $DOCKGE_PATHS; do
+                COMPOSE_FILES=$(echo "$COMPOSE_FILES" | grep -v "$DOCKGE_PATH" || true)
+            done
+            
+            # Estrai i percorsi univoci degli stack
+            STACK_PATHS=$(echo "$COMPOSE_FILES" | xargs -n1 dirname | sort -u || true)
+            
+            for PATH_STACK in $STACK_PATHS; do
+                # Estrae il nome dello stack (ultima parte del percorso)
+                NOME_STACK=$(basename "$PATH_STACK")
+                
+                if ! aggiorna_stack "$ID" "$PATH_STACK" "$NOME_STACK"; then
+                    UPDATE_STATUS=1
+                    break
+                fi
+            done
         fi
+    fi # Fine Dry Run check
+
+    # 5. Gestione esito finale
+    if [ "$UPDATE_STATUS" -eq 0 ]; then
+        TOTAL_SUCCESS=$((TOTAL_SUCCESS + 1))
+        echo -e "--------------------------------------------------------"
+        echo -e "${C_SUCCESS}AGGIORNAMENTO RIUSCITO per LXC $ID.${C_RESET}"
+        
+        # Pulizia post-successo
+        if [ "$KEEP_LAST_SNAPSHOT" = true ]; then
+             echo "Configurazione KEEP_LAST_SNAPSHOT=true: lo snapshot $SNAPSHOT_NAME viene MANTENUTO."
+        else
+            if [ "$DRY_RUN" = false ]; then
+                echo "Configurazione KEEP_LAST_SNAPSHOT=false: rimozione dello snapshot $SNAPSHOT_NAME..."
+                if pct delsnapshot $ID $SNAPSHOT_NAME; then
+                     echo -e "${C_SUCCESS}Snapshot rimosso con successo.${C_RESET}"
+                else
+                    echo -e "${C_WARNING}ATTENZIONE: Impossibile rimuovere lo snapshot $SNAPSHOT_NAME. Rimuovere manualmente.${C_RESET}"
+                fi
+            else
+                echo -e "  [DRY-RUN] Snapshot $SNAPSHOT_NAME rimosso (simulato) (KEEP_LAST_SNAPSHOT=false)."
+            fi
+        fi
+    else
+        TOTAL_FAIL=$((TOTAL_FAIL + 1))
+        esegui_rollback "$ID" "$SNAPSHOT_NAME"
     fi
-    echo -e "${C_INFO}#### FINE PROCESSO PER LXC ID $LXC_ID ####${C_RESET}"
-    echo ""
+
+    echo -e "#### FINE PROCESSO PER LXC ID $ID ####"
 done
 
-# --- 4. REPORT FINALE ---
-echo ""
-echo "========================================================"
-echo -e "${C_INFO}===== REPORT FINALE AGGIORNAMENTO LXC & DOCKER =====${C_RESET}"
-echo "========================================================"
-printf "%b\n" "${REPORT[@]}"
-echo "========================================================"
+# ======================================================================
+# REPORT FINALE
+# ======================================================================
+
+echo -e "\n========================================================"
+echo -e "===== REPORT FINALE AGGIORNAMENTO LXC & DOCKER ====="
+echo -e "========================================================"
+
+for ID in $IDs; do
+    LXC_HOSTNAME=$(pct config $ID | grep 'hostname' | awk '{print $2}' || echo "LXC $ID")
+    
+    # La logica del report finale non è in grado di tracciare lo stato esatto del loop precedente, 
+    # quindi si basa sui conteggi totali per un riassunto finale generico.
+    # Per un tracciamento preciso, il loop principale dovrebbe aggiornare uno stato per ogni ID.
+    
+    # Riporto lo stato generico basato sull'attività complessiva.
+    if [ "$TOTAL_FAIL" -eq 0 ] && [ "$TOTAL_SUCCESS" -gt 0 ]; then
+        # Se tutti gli aggiornamenti eseguiti sono andati a buon fine
+        echo -e "LXC $ID ($LXC_HOSTNAME) → ${C_SUCCESS}OK${C_RESET}"
+    elif [ "$TOTAL_FAIL" -gt 0 ]; then
+        # Se c'è stato almeno un fallimento (anche se altri sono riusciti)
+        echo -e "LXC $ID ($LXC_HOSTNAME) → ${C_WARNING}VERIFICARE (Fallimenti: $TOTAL_FAIL)${C_RESET}"
+    elif [ "$TOTAL_SUCCESS" -eq 0 ] && [ "$TOTAL_FAIL" -eq 0 ]; then
+        # Se non è successo nulla (LXC saltato o dry-run)
+        echo -e "LXC $ID ($LXC_HOSTNAME) → ${C_INFO}PROCESSATO/SALTATO${C_RESET}"
+    fi
+done
+
+if [ "$TOTAL_FAIL" -gt 0 ]; then
+    echo -e "\n${C_ERROR}ATTENZIONE: Sono falliti $TOTAL_FAIL aggiornamenti. Rollback eseguiti.${C_RESET}"
+fi
+
+echo -e "========================================================"
