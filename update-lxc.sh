@@ -13,12 +13,12 @@ SCAN_ROOTS="/root /opt/stacks"
 DOCKGE_PATHS="/root/dockge_install/dockge" 
 
 # Se true, l'ultimo snapshot di successo viene mantenuto come backup.
-# ⚠️ V1.6.0: Pulizia eseguita DOPO la creazione del nuovo snapshot per mantenere solo l'ultimo (N=1).
+# V1.6.0: Pulizia eseguita DOPO la creazione del nuovo snapshot per mantenere solo l'ultimo (N=1).
 KEEP_LAST_SNAPSHOT=true 
 # -------------------
 
 # --- CONFIGURAZIONE VARIABILI INTERNE ---
-SCRIPT_VERSION="1.6.0 (Final Execution Order Fix)" # Versione Aggiornata
+SCRIPT_VERSION="1.6.1 (Report Cleanup)" # Versione Aggiornata
 SNAP_PREFIX="AUTO_UPDATE_SNAP"
 HOST_IP=$(hostname -I | awk '{print $1}')
 
@@ -30,7 +30,7 @@ C_YELLOW='\033[1;33m' # Giallo Brillante/Fluo: Info, Warning, Dry-Run (Alta legg
 C_CYAN='\033[0;36m'   # Ciano
 
 # IMPOSTAZIONE NUOVI COLORI STANDARD
-C_INFO=${C_YELLOW}    # Info e Avanzamento in Giallo Brillante
+C_INFO=${C_CYAN}      # Info e Avanzamento in Ciano
 C_ERROR=${C_RED}
 C_SUCCESS=${C_GREEN}
 C_WARNING=${C_YELLOW} # Warning in Giallo Brillante
@@ -201,7 +201,7 @@ pulisci_old_snap_n1() {
     
     # Se ci sono 0 o 1 snapshot automatici, non c'è nulla da rimuovere.
     if [ ${#SNAPS_ARRAY[@]} -le 1 ]; then
-        echo "   Trovato 1 o meno snapshot. Nessuna rimozione necessaria (L'ultimo è mantenuto).${C_DEFAULT}"
+        echo -e "   Trovato 1 o meno snapshot. Nessuna rimozione necessaria (L'ultimo è mantenuto).${C_DEFAULT}"
         return 0
     fi
     
@@ -393,23 +393,31 @@ aggiorna_stack() {
         
         # Filtra l'output UP per vedere i container che sono stati toccati (Started, Restarted)
         CONTAINERS_TOUCHED=$(echo "$UP_OUTPUT" | grep -E 'Started|Restarted|Created' | grep 'Container' | sed 's/\[+\] Container //g' | sed 's/ Started.*//g' | sed 's/ Restarted.*//g' | sed 's/ Created.*//g' | xargs -I {} echo " - {}" | tr '\n' ' ' || true)
+        
+        # Se non ci sono stati aggiornamenti di immagine, e non c'è stato output di riavvio: azzera per indicare "Nessun aggiornamento"
+        if [ -z "$UPDATED_IMAGES" ] && [ -z "$CONTAINERS_TOUCHED" ]; then
+             CONTAINERS_TOUCHED=""
+        fi
     else
         echo -e "   -> ${C_WARNING}Nessun servizio attivo trovato. Stato mantenuto (stoppato).${C_DEFAULT}"
         CONTAINERS_TOUCHED="Nessun riavvio (Status: Stoppato)"
     fi
 
-    # 5. Crea l'entry di log
+    # 5. Crea l'entry di log (LOGICA AGGIORNATA QUI)
     if [ "$EXIT_STATUS" -eq 0 ]; then
         local LOG_ENTRY="LXC $ID - $NOME_STACK:"
         
-        # Il log è "Aggiornato" solo se UPDATED_IMAGES NON è vuoto O se ci sono stati riavvii
-        if [ -n "$UPDATED_IMAGES" ] || [ "$CONTAINERS_TOUCHED" != "Nessun riavvio (Status: Stoppato)" ]; then
+        # CASO 1: Aggiornamento o riavvio Effettivo rilevato (immagini aggiornate O container toccati)
+        if [ -n "$UPDATED_IMAGES" ] || [ -n "$CONTAINERS_TOUCHED" ] && [ "$CONTAINERS_TOUCHED" != "Nessun riavvio (Status: Stoppato)" ]; then
             LOG_ENTRY+=" Immagini Aggiornate:${UPDATED_IMAGES:- Nessuna} | Containers Riavviati:${CONTAINERS_TOUCHED:- Nessuno}"
+            UPDATE_LOGS+=("✅ $LOG_ENTRY") # Aggiunge con prefisso verde
         else
-            LOG_ENTRY+=" Nessun aggiornamento trovato."
+            # CASO 2: Nessun aggiornamento necessario (Immagini: Nessuna, Riavviati: Nessuno o Stoppati)
+            LOG_ENTRY+=" Nessun aggiornamento necessario."
+            UPDATE_LOGS+=("🟡 $LOG_ENTRY") # Aggiunge con prefisso giallo per chiarezza
         fi
         
-        UPDATE_LOGS+=("$LOG_ENTRY")
+        # Stampa a schermo la conferma generale
         echo -e "   -> ${C_SUCCESS}$NOME_STACK aggiornato con successo (solo servizi attivi riavviati).${C_DEFAULT}"
     else
         echo -e "   -> ${C_ERROR}ERRORE $EXIT_STATUS nell'avvio dei servizi di $NOME_STACK. (Rollback in arrivo).${C_DEFAULT}"
