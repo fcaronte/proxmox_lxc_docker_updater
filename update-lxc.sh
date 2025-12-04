@@ -10,7 +10,7 @@
 # --- USER CONFIG ---
 SCAN_ROOTS="/root /opt/stacks"
 # Percorso di Dockge
-DOCKGE_PATHS="/root/dockge_install/dockge" 
+DOCKGE_PATHS="/root/dockge_install/dockge /opt/dockge" 
 
 # Se true, l'ultimo snapshot di successo viene mantenuto come backup.
 # V1.6.0: Pulizia eseguita DOPO la creazione del nuovo snapshot per mantenere solo l'ultimo (N=1).
