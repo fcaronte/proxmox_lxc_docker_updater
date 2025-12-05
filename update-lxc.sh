@@ -513,4 +513,130 @@ processa_lxc() {
             
             # Salta Dockge se è già stato aggiornato (ora usa l'array)
             local IS_DOCKGE=false
-            for DOCKGE_PATH in "${DOCKGE_PATHS_ARRAY
+            for DOCKGE_PATH in "${DOCKGE_PATHS_ARRAY[@]}"; do
+                if [ "$PATH_STACK" == "$DOCKGE_PATH" ]; then
+                    IS_DOCKGE=true
+                    break
+                fi
+            done
+            
+            if [ "$IS_DOCKGE" = true ]; then
+                continue 
+            fi
+            
+            aggiorna_stack "$ID" "$PATH_STACK" "$STACK_NAME"
+            
+            if [ $? -ne 0 ]; then
+                esegui_rollback "$ID" "$SNAP_NAME"
+                return 1
+            fi
+        done
+    done
+    
+    # 4. Aggiornamento Riuscito (Gestione finale)
+    AGGIORNAMENTO_RIUSCITO=true
+    # Aggiungi l'ID all'array di successo
+    SUCCESS_LXC_IDS+=("$ID")
+    
+    echo -e "--------------------------------------------------------"
+    echo -e "${C_SUCCESS}AGGIORNAMENTO RIUSCITO per LXC $ID.${C_DEFAULT}"
+    
+    # 5. Pulizia Snapshot (Se richiesto)
+    if [ "$KEEP_LAST_SNAPSHOT" = true ] && [ "$AGGIORNAMENTO_RIUSCITO" = true ]; then
+        # ATTENZIONE: La logica di pulizia $N=1 deve essere chiamata dopo aver creato il nuovo snapshot.
+        echo "Configurazione KEEP_LAST_SNAPSHOT=true: lo snapshot Creazione snapshot $SNAP_NAME..."
+        echo -e "${C_CYAN}$SNAP_NAME è ora L'UNICO MANTENUTO.${C_DEFAULT}"
+        pulisci_old_snap_n1 "$ID"
+    fi
+    
+    # 6. Pulizia Docker System (NUOVA FASE)
+    if [ "$AGGIORNAMENTO_RIUSCITO" = true ]; then
+        esegui_docker_prune "$ID"
+    fi
+
+    echo "Nota: Tutti gli snapshot precedenti sono stati processati per la rimozione."
+    echo -e "${C_INFO}#### FINE PROCESSO PER LXC ID $ID ####${C_DEFAULT}"
+    
+    return 0
+}
+
+
+# ======================================================================
+# LOOP PRINCIPALE
+# ======================================================================
+
+# Trova gli ID da processare
+LXC_IDS=$(trova_lxc_ids "${ARGS[@]}")
+
+if [ -z "$LXC_IDS" ]; then
+    echo -e "${C_ERROR}ERRORE: Nessun LXC trovato o ID/nome non valido: ${ARGS[*]}${C_DEFAULT}"
+    exit 1
+fi
+
+echo "ID LXC da processare: $LXC_IDS"
+echo -e "\n--------------------------------------------------------"
+
+
+# Gestione modalità CLEAN (solo pulizia snapshot, senza aggiornamento)
+if [ "$CLEAN_MODE" = true ]; then
+    echo -e "${C_INFO}===== AVVIO PULIZIA MANUALE SNAPSHOTS =====${C_DEFAULT}"
+    for ID in $LXC_IDS; do
+        pulisci_snapshot_manuale "$ID"
+    done
+    echo -e "${C_SUCCESS}===== PULIZIA MANUALE COMPLETA =====${C_DEFAULT}"
+    exit 0
+fi
+
+# Loop di aggiornamento
+for ID in $LXC_IDS; do
+    processa_lxc "$ID"
+done
+
+# ======================================================================
+# REPORT FINALE
+# ======================================================================
+echo -e "\n========================================================"
+echo -e "===== REPORT FINALE AGGIORNAMENTO LXC & DOCKER ====="
+echo -e "========================================================"
+
+echo "--- Dettagli degli Aggiornamenti Riusciti ---"
+if [ ${#UPDATE_LOGS[@]} -eq 0 ]; then
+    echo "Nessun log di aggiornamento da mostrare."
+else
+    for ENTRY in "${UPDATE_LOGS[@]}"; do
+        # Stampa l'entry con il colore del prefisso (✅=verde, 🟡=giallo)
+        case "$ENTRY" in
+            "✅ "* )
+                echo -e "${C_SUCCESS}${ENTRY}${C_DEFAULT}"
+                ;;
+            "🟡 "* )
+                echo -e "${C_WARNING}${ENTRY}${C_DEFAULT}"
+                ;;
+            * )
+                echo "$ENTRY"
+                ;;
+        esac
+    done
+fi
+echo "---"
+
+echo "--- Stato Finale LXC ---"
+
+# Usa l'array SUCCESS_LXC_IDS per determinare lo stato del risultato
+LXC_SUCCESS_MAP=$(for ID in "${SUCCESS_LXC_IDS[@]}"; do echo "$ID"; done)
+
+for ID in $LXC_IDS; do
+    LXC_STATUS=$(pct status $ID 2>/dev/null)
+    NOME=$(pct config $ID 2>/dev/null | grep 'hostname' | awk '{print $2}' || echo "LXC $ID")
+    
+    if echo "$LXC_STATUS" | grep -q "running"; then
+        if [[ " ${LXC_SUCCESS_MAP[@]} " =~ " $ID " ]]; then
+            echo -e "${C_SUCCESS}LXC $ID ($NOME) → OK (Aggiornamento Riuscito)${C_DEFAULT}"
+        else
+            echo -e "${C_WARNING}LXC $ID ($NOME) → OK (Aggiornamento Saltato/Precedente)${C_DEFAULT}"
+        fi
+    else
+        echo -e "${C_ERROR}LXC $ID ($NOME) → ERRORE/Stoppato ($LXC_STATUS)${C_DEFAULT}"
+    fi
+done
+echo "========================================================"
