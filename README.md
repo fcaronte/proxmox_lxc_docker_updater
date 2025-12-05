@@ -1,4 +1,4 @@
-# SCRIPT update-lxc.sh (Versione 48)
+# SCRIPT update-lxc.sh
 
 Script robusto per automatizzare l'aggiornamento degli stack **Docker Compose** all'interno dei container **LXC** su un host **Proxmox**.
 
@@ -12,7 +12,7 @@ Sviluppato in collaborazione con l'assistente AI Gemini.
 
 ---
 
-## NOVITÀ VERSIONE 48
+## NOVITA'
 
 * **Keep Last Snapshot:** Per default (`KEEP_LAST_SNAPSHOT=true`) mantiene l'ultimo snapshot di successo.
 * **Aggiornamento Selettivo:** Rileva i servizi attivi e aggiorna solo quelli, mantenendo i container fermi nello stato fermo.
