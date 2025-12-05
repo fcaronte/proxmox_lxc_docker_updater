@@ -18,7 +18,7 @@ KEEP_LAST_SNAPSHOT=true
 # -------------------
 
 # --- CONFIGURAZIONE VARIABILI INTERNE ---
-SCRIPT_VERSION="1.6.4 (Report Fix)" # Versione Aggiornata
+SCRIPT_VERSION="1.6.5 (Reliable Digest Check)" # Versione Aggiornata
 SNAP_PREFIX="AUTO_UPDATE_SNAP"
 HOST_IP=$(hostname -I | awk '{print $1}')
 
@@ -37,7 +37,7 @@ C_WARNING=${C_YELLOW}
 
 # Array globali per raccogliere i log e gli ID di successo
 declare -a UPDATE_LOGS
-declare -a SUCCESS_LXC_IDS # Nuovo array per tracciare gli ID che hanno avuto successo
+declare -a SUCCESS_LXC_IDS 
 
 # --- GESTIONE ARGOMENTI E MODALITÀ ---
 DRY_RUN=false
@@ -127,10 +127,10 @@ trova_lxc_ids() {
 
 
 # ======================================================================
-# GESTIONE PULIZIA
+# GESTIONE PULIZIA E SNAPSHOT (Funzioni Invariate)
 # ======================================================================
 
-# Funzione NUOVA: Pulizia di Container e Immagini Docker non utilizzati
+# Funzione: Pulizia di Container e Immagini Docker non utilizzati
 esegui_docker_prune() {
     local ID=$1
     echo -e "${C_INFO}   Avvio pulizia spazio Docker (Immagini/Container non utilizzati) su LXC $ID...${C_DEFAULT}"
@@ -321,7 +321,7 @@ esegui_rollback() {
 }
 
 # ======================================================================
-# AGGIORNAMENTO DOCKER COMPOSE
+# AGGIORNAMENTO DOCKER COMPOSE (Logica di verifica Digest Rafforzata)
 # ======================================================================
 
 aggiorna_stack() {
@@ -355,19 +355,18 @@ aggiorna_stack() {
     local ACTIVE_SERVICES=$(echo "$ACTIVE_SERVICES_RAW" | grep -v '^\s*$' | xargs || true)
     
     
-    # 2. Ottieni l'Image Digest PRIMA del Pull (USO SOLO IL PRIMO SERVIZIO TROVATO PER IL CHECK)
+    # 2. Ottieni l'Image ID/Digest PRIMA del Pull (più robusto)
     local IMAGE_NAME
-    local PRE_PULL_DIGEST=""
+    local PRE_PULL_ID=""
     
     # Trova il nome dell'immagine dal file compose
+    # Prende il primo servizio per il check dell'immagine.
     IMAGE_NAME=$(esegui_remoto "$ID" "grep 'image:' \"$COMPOSE_FILE\" | head -n 1 | awk '{print \$2}' || true")
     
     if [ -n "$IMAGE_NAME" ]; then
-        # Recupera il Digest ID dell'immagine corrente
-        PRE_PULL_DIGEST=$(esegui_remoto "$ID" "docker images --digests $IMAGE_NAME | awk 'NR>1 {print \$3}' || true")
-        if [ -z "$PRE_PULL_DIGEST" ]; then
-            PRE_PULL_DIGEST=$(esegui_remoto "$ID" "docker images --no-trunc $IMAGE_NAME | awk 'NR>1 {print \$3}' || true")
-        fi
+        # *** LOGICA RAFFORZATA (v1.6.5) ***: Estrae l'Image ID (che è sempre univoco) 
+        # Cerca l'immagine e prende il suo ID (la terza colonna di `docker images`)
+        PRE_PULL_ID=$(esegui_remoto "$ID" "docker images --no-trunc \"$IMAGE_NAME\" | awk 'NR>1 {print \$3}' | head -n 1 || true")
     fi
 
     echo -e "   -> ${C_INFO}Pulling nuove immagini per $NOME_STACK...${C_DEFAULT}"
@@ -381,18 +380,15 @@ aggiorna_stack() {
     
     local UPDATED_IMAGES=""
     
-    # 3. Ottieni l'Image Digest DOPO il Pull e CONFRONTA
-    if [ -n "$IMAGE_NAME" ] && [ -n "$PRE_PULL_DIGEST" ]; then # Confronta solo se l'ID iniziale era stato trovato
-        local POST_PULL_DIGEST
+    # 3. Ottieni l'Image ID/Digest DOPO il Pull e CONFRONTA
+    if [ -n "$IMAGE_NAME" ] && [ -n "$PRE_PULL_ID" ]; then # Confronta solo se l'ID iniziale era stato trovato
+        local POST_PULL_ID
         
-        POST_PULL_DIGEST=$(esegui_remoto "$ID" "docker images --digests $IMAGE_NAME | awk 'NR>1 {print \$3}' || true")
+        # Recupera il nuovo Image ID dopo il pull
+        POST_PULL_ID=$(esegui_remoto "$ID" "docker images --no-trunc \"$IMAGE_NAME\" | awk 'NR>1 {print \$3}' | head -n 1 || true")
         
-        if [ -z "$POST_PULL_DIGEST" ]; then
-            POST_PULL_DIGEST=$(esegui_remoto "$ID" "docker images --no-trunc $IMAGE_NAME | awk 'NR>1 {print \$3}' || true")
-        fi
-        
-        # Confronto cruciale: se il digest è cambiato, c'è stato un aggiornamento
-        if [ "$PRE_PULL_DIGEST" != "$POST_PULL_DIGEST" ]; then
+        # Confronto cruciale: se l'ID è cambiato, c'è stato un aggiornamento
+        if [ "$PRE_PULL_ID" != "$POST_PULL_ID" ]; then
             UPDATED_IMAGES=" - $IMAGE_NAME"
         fi
     fi
@@ -411,7 +407,7 @@ aggiorna_stack() {
             EXIT_STATUS=1
         fi
         
-        # Filtra l'output UP per vedere i container che sono stati toccati (Started, Restarted)
+        # Filtra l'output UP per vedere i container che sono stati toccati (Started, Restarted, Created)
         CONTAINERS_TOUCHED=$(echo "$UP_OUTPUT" | grep -E 'Started|Restarted|Created' | grep 'Container' | sed 's/\[+\] Container //g' | sed 's/ Started.*//g' | sed 's/ Restarted.*//g' | sed 's/ Created.*//g' | xargs -I {} echo " - {}" | tr '\n' ' ' || true)
         
         # Se non ci sono stati aggiornamenti di immagine, e non c'è stato output di riavvio: azzera per indicare "Nessun aggiornamento"
@@ -428,7 +424,7 @@ aggiorna_stack() {
         local LOG_ENTRY="LXC $ID - $NOME_STACK:"
         
         # CASO 1: Aggiornamento o riavvio Effettivo rilevato (immagini aggiornate O container toccati)
-        if [ -n "$UPDATED_IMAGES" ] || [ -n "$CONTAINERS_TOUCHED" ] && [ "$CONTAINERS_TOUCHED" != "Nessun riavvio (Status: Stoppato)" ]; then
+        if [ -n "$UPDATED_IMAGES" ] || ([ -n "$CONTAINERS_TOUCHED" ] && [ "$CONTAINERS_TOUCHED" != "Nessun riavvio (Status: Stoppato)" ]); then
             LOG_ENTRY+=" Immagini Aggiornate:${UPDATED_IMAGES:- Nessuna} | Containers Riavviati:${CONTAINERS_TOUCHED:- Nessuno}"
             UPDATE_LOGS+=("✅ $LOG_ENTRY") # Aggiunge con prefisso verde
         else
@@ -504,7 +500,7 @@ processa_lxc() {
     done
     
     # B. Scansione e Aggiornamento altri stack
-    echo "Inizio scansione Docker Compose nei percorsi: $SCAN_ROOTS..."
+    echo "Inizio scansione Docker Compose nei percorsi: /root /opt/stacks..."
     local DOCKGE_PATHS_ARRAY=($DOCKGE_PATHS) # Converti i percorsi Dockge in un array per la ricerca
     
     for ROOT in $SCAN_ROOTS; do
@@ -517,133 +513,4 @@ processa_lxc() {
             
             # Salta Dockge se è già stato aggiornato (ora usa l'array)
             local IS_DOCKGE=false
-            for DOCKGE_PATH in "${DOCKGE_PATHS_ARRAY[@]}"; do
-                if [ "$PATH_STACK" == "$DOCKGE_PATH" ]; then
-                    IS_DOCKGE=true
-                    break
-                fi
-            done
-            
-            if [ "$IS_DOCKGE" = true ]; then
-                continue 
-            fi
-            
-            aggiorna_stack "$ID" "$PATH_STACK" "$STACK_NAME"
-            
-            if [ $? -ne 0 ]; then
-                esegui_rollback "$ID" "$SNAP_NAME"
-                return 1
-            fi
-        done
-    done
-    
-    # 4. Aggiornamento Riuscito (Gestione finale)
-    AGGIORNAMENTO_RIUSCITO=true
-    # Aggiungi l'ID all'array di successo
-    SUCCESS_LXC_IDS+=("$ID")
-    
-    echo -e "--------------------------------------------------------"
-    echo -e "${C_SUCCESS}AGGIORNAMENTO RIUSCITO per LXC $ID.${C_DEFAULT}"
-    
-    # 5. Pulizia Snapshot (Se richiesto)
-    if [ "$KEEP_LAST_SNAPSHOT" = true ] && [ "$AGGIORNAMENTO_RIUSCITO" = true ]; then
-        # ATTENZIONE: La logica di pulizia $N=1 deve essere chiamata dopo aver creato il nuovo snapshot.
-        echo "Configurazione KEEP_LAST_SNAPSHOT=true: lo snapshot Creazione snapshot $SNAP_NAME..."
-        echo -e "${C_CYAN}$SNAP_NAME è ora L'UNICO MANTENUTO.${C_DEFAULT}"
-        pulisci_old_snap_n1 "$ID"
-    fi
-    
-    # 6. Pulizia Docker System (NUOVA FASE)
-    if [ "$AGGIORNAMENTO_RIUSCITO" = true ]; then
-        esegui_docker_prune "$ID"
-    fi
-
-    echo "Nota: Tutti gli snapshot precedenti sono stati processati per la rimozione."
-    echo -e "${C_INFO}#### FINE PROCESSO PER LXC ID $ID ####${C_DEFAULT}"
-    
-    return 0
-}
-
-
-# ======================================================================
-# LOOP PRINCIPALE
-# ======================================================================
-
-# Trova gli ID da processare
-LXC_IDS=$(trova_lxc_ids "${ARGS[@]}")
-
-if [ -z "$LXC_IDS" ]; then
-    echo -e "${C_ERROR}ERRORE: Nessun LXC trovato o ID/nome non valido: ${ARGS[*]}${C_DEFAULT}"
-    exit 1
-fi
-
-echo "ID LXC da processare: $LXC_IDS"
-echo -e "\n--------------------------------------------------------"
-
-
-# Gestione modalità CLEAN (solo pulizia snapshot, senza aggiornamento)
-if [ "$CLEAN_MODE" = true ]; then
-    echo -e "${C_INFO}===== AVVIO PULIZIA MANUALE SNAPSHOTS =====${C_DEFAULT}"
-    for ID in $LXC_IDS; do
-        pulisci_snapshot_manuale "$ID"
-    done
-    echo -e "${C_SUCCESS}===== PULIZIA MANUALE COMPLETA =====${C_DEFAULT}"
-    exit 0
-fi
-
-# Loop di aggiornamento
-for ID in $LXC_IDS; do
-    processa_lxc "$ID"
-done
-
-# ======================================================================
-# REPORT FINALE
-# ======================================================================
-echo -e "\n========================================================"
-echo -e "===== REPORT FINALE AGGIORNAMENTO LXC & DOCKER ====="
-echo -e "========================================================"
-
-echo "--- Dettagli degli Aggiornamenti Riusciti ---"
-if [ ${#UPDATE_LOGS[@]} -eq 0 ]; then
-    echo "Nessun log di aggiornamento da mostrare."
-else
-    for ENTRY in "${UPDATE_LOGS[@]}"; do
-        # Stampa l'entry con il colore del prefisso (✅=verde, 🟡=giallo)
-        case "$ENTRY" in
-            "✅ "* )
-                echo -e "${C_SUCCESS}${ENTRY}${C_DEFAULT}"
-                ;;
-            "🟡 "* )
-                echo -e "${C_WARNING}${ENTRY}${C_DEFAULT}"
-                ;;
-            * )
-                echo "$ENTRY"
-                ;;
-        esac
-    done
-fi
-echo "---"
-
-echo "--- Stato Finale LXC ---"
-
-# Usa l'array SUCCESS_LXC_IDS per determinare lo stato del risultato
-LXC_SUCCESS_MAP=$(for ID in "${SUCCESS_LXC_IDS[@]}"; do echo "$ID"; done)
-
-for ID in $LXC_IDS; do
-    LXC_STATUS=$(pct status $ID 2>/dev/null)
-    NOME=$(pct config $ID 2>/dev/null | grep 'hostname' | awk '{print $2}' || echo "LXC $ID")
-    
-    if echo "$LXC_STATUS" | grep -q "running"; then
-        if [[ " ${LXC_SUCCESS_MAP[@]} " =~ " $ID " ]]; then
-            # L'ID è nell'array di successo
-            echo -e "${C_SUCCESS}LXC $ID ($NOME) → OK (Aggiornamento Riuscito)${C_DEFAULT}"
-        else
-            # L'LXC è attivo, ma l'aggiornamento è stato saltato (es. era 'stoppato' prima)
-            echo -e "${C_WARNING}LXC $ID ($NOME) → OK (Aggiornamento Saltato/Precedente)${C_DEFAULT}"
-        fi
-    else
-        # L'LXC non è attivo
-        echo -e "${C_ERROR}LXC $ID ($NOME) → ERRORE/Stoppato ($LXC_STATUS)${C_DEFAULT}"
-    fi
-done
-echo "========================================================"
+            for DOCKGE_PATH in "${DOCKGE_PATHS_ARRAY
