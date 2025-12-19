@@ -1,177 +1,191 @@
-# SCRIPT update-lxc.sh
+---
 
-Script robusto per automatizzare l'aggiornamento degli stack **Docker Compose** all'interno dei container **LXC** su un host **Proxmox**.
+# SCRIPT update-lxc.sh (v1.7.0)
 
-La caratteristica principale è la **sicurezza**: viene creato automaticamente uno **snapshot Proxmox** prima di ogni aggiornamento.
+Script professionale e robusto per automatizzare l'aggiornamento degli stack **Docker Compose** all'interno dei container **LXC** su host **Proxmox**.
 
-* Di default mantiene l'ultimo snapshot di successo per facilitare rollback manuali.
-* Se l'aggiornamento fallisce -> viene eseguito un **rollback automatico** e lo snapshot viene eliminato.
-* Aggiornamento selettivo: rileva automaticamente i container Docker fermi e li aggiorna senza avviarli.
-
-Sviluppato in collaborazione con l'assistente AI Gemini.
+Sviluppato per garantire la massima sicurezza operativa attraverso l'integrazione nativa con le API di Proxmox.
 
 ---
 
-## NOVITA'
+## 🌟 Caratteristiche Principali
 
-* **Keep Last Snapshot:** Per default (`KEEP_LAST_SNAPSHOT=true`) mantiene l'ultimo snapshot di successo.
-* **Aggiornamento Selettivo:** Rileva i servizi attivi e aggiorna solo quelli, mantenendo i container fermi nello stato fermo.
-* **Supporto Multi-Path:** Ora supporta più percorsi per scansione Docker e installazioni Dockge.
-* **Logica Ottimizzata:** Pulizia automatica dei vecchi snapshot gestiti dallo script.
-* **Modalità Pulizia (`clean`):** Nuova opzione per eliminare manualmente gli snapshot di sicurezza obsoleti.
-* **Correzioni Bug:** Migliorata gestione caratteri speciali e stabilità generale.
+* **Sicurezza con Snapshot:** Crea automaticamente uno snapshot Proxmox prima di ogni modifica.
+* **Rollback Automatico:** In caso di errore durante l'aggiornamento, lo script esegue il rollback istantaneo allo stato precedente.
+* **Novità: Modalità No-Snap (`--no-snap`):** Permette aggiornamenti rapidi senza creare snapshot (utile per container non critici o con poco spazio disco).
+* **Aggiornamento Selettivo:** Rileva quali container sono "Running" e aggiorna/riavvia solo quelli, lasciando i container fermi nel loro stato originale (ma con le immagini aggiornate).
+* **Logica Digest (v1.6.5+):** Verifica l'Image ID reale di Docker per confermare se un aggiornamento è avvenuto effettivamente.
+* **Multi-Path & Dockge:** Supporto nativo per installazioni multiple di Dockge e scansione di directory multiple (es. `/root` e `/opt`).
 
 ---
 
-## Configurazione Iniziale ⚙️
+## ⚙️ Configurazione Iniziale
 
-Prima di utilizzare lo script, modifica le variabili nella sezione **USER CONFIG**:
+Modifica le variabili nella sezione **USER CONFIG** all'inizio dello script:
 
 | Variabile | Descrizione | Default |
-| :--- | :--- | :--- |
-| **SCAN\_ROOTS** | Directory nell'LXC dove cercare gli stack compose (supporta multipli, separati da spazio) | `/root /opt/stacks` |
-| **DOCKGE\_PATHS** | Percorsi delle installazioni di Dockge (supporta multipli, separati da spazio) | `/root/dockge_install/dockge /opt/dockge` |
-| **KEEP\_LAST\_SNAPSHOT** | Se `true`, mantiene l'ultimo snapshot di successo. | `true` |
+| --- | --- | --- |
+| **SCAN_ROOTS** | Directory dove cercare file `compose.yml` (scansione profonda 2 livelli). | `/root /opt/stacks` |
+| **DOCKGE_PATHS** | Percorsi specifici per Dockge. | `/root/dockge_install/dockge /opt/dockge` |
+| **KEEP_LAST_SNAPSHOT** | Se `true`, mantiene l'ultimo snapshot di successo come backup. | `true` |
 
-### Permessi di esecuzione
+### Permessi
+
 ```bash
 chmod +x update-lxc.sh
-````
-
------
-
-## Utilizzo 🚀
-
-Lo script richiede uno o più identificatori LXC (ID o nome parziale) come argomento.
-
-### 1\. Modalità Dry Run (Simulazione)
-
-Visualizza cosa accadrebbe senza eseguire modifiche reali:
-
-| Comando | Descrizione |
-| :--- | :--- |
-| `./update-lxc.sh --dry-run 8006` | Simula aggiornamento per LXC ID 8006. |
-| `./update-lxc.sh all --dry-run` | Simula aggiornamento per tutti gli LXC attivi. |
-| `./update-lxc.sh hom --dry-run` | Simula aggiornamento per LXC con hostname contenente "hom" (es. Homarr). |
-
-### 2\. Aggiornamento Reale
-
-Esegue l'aggiornamento con snapshot:
-
-| Comando | Descrizione |
-| :--- | :--- |
-| `./update-lxc.sh 8006 8011` | Aggiorna solo gli LXC con ID 8006 e 8011. |
-| `./update-lxc.sh all` | **ATTENZIONE:** Aggiorna tutti gli LXC attivi con Docker. |
-| `./update-lxc.sh immich` | Aggiorna LXC con hostname contenente "immich". |
-
-### 3\. Modalità Pulizia Snapshot 🗑️ (NOVITÀ)
-
-Elimina tutti gli snapshot creati dallo script (`AUTO_UPDATE_SNAP_`) per gli LXC specificati, liberando spazio.
-
-| Comando | Descrizione |
-| :--- | :--- |
-| `./update-lxc.sh all clean` | Pulisce gli snapshot per tutti gli LXC attivi. |
-| `./update-lxc.sh clean 8006 imm` | Pulisce gli snapshot solo per LXC 8006 e quelli con nome contenente "imm". |
-
------
-
-## Esecuzione Diretta (Opzionale) 🌐
-
-È possibile eseguire l'ultima versione dello script direttamente dal repository GitHub senza doverlo scaricare e rendere eseguibile.
-
-> ⚠️ **ATTENZIONE:** Usare cautela quando si eseguono script scaricati direttamente dalla rete. Sostituisci `[URL_GREZZO_SCRIPT]` con l'URL raw del tuo script.
-
-| Comando | Descrizione |
-| :--- | :--- |
-| `bash -c "$(curl -fsSL https://raw.githubusercontent.com/fcaronte/proxmox_lxc_docker_updater/main/update-lxc.sh)" -- all` | Scarica ed esegue l'ultima versione su tutti gli LXC attivi. |
-| `bash -c "$(curl -fsSL https://raw.githubusercontent.com/fcaronte/proxmox_lxc_docker_updater/main/update-lxc.sh)" -- clean all` | Scarica ed esegue la pulizia degli snapshot su tutti gli LXC. |
-
------
-
-## Logica di Aggiornamento Selettivo
-
-La nuova versione implementa un aggiornamento intelligente:
-
-1.  **Rilevamento stato:** Identifica quali servizi erano attivi prima dell'aggiornamento.
-2.  **Pull immagini:** Scarica tutte le nuove immagini disponibili.
-3.  **Avvio selettivo:** Riavvia solo i servizi che erano già in esecuzione.
-4.  **Mantenimento stato:** I container fermi rimangono fermi dopo l'aggiornamento.
-
-**Esempio:** Se hai un stack con 5 servizi ma solo 3 attivi, dopo l'aggiornamento:
-
-  * I 3 servizi attivi vengono aggiornati e riavviati.
-  * I 2 servizi fermi vengono aggiornati ma rimangono fermi.
-
------
-
-## Logica di Sicurezza e Snapshot
-
-Ogni aggiornamento segue questi passaggi:
-
-1.  Verifica Docker → se non installato, l'LXC viene saltato.
-2.  Pulizia snapshot vecchi → rimuove automaticamente i vecchi snapshot creati dallo script.
-3.  Creazione nuovo snapshot → se fallisce, il processo si interrompe.
-4.  Aggiornamento stack → in ordine:
-      * Prima tutti gli stack Dockge configurati.
-      * Poi tutti gli altri stack rilevati (esclusi Dockge).
-5.  **Gestione esito:**
-      * Successo totale → snapshot mantenuto (se `KEEP_LAST_SNAPSHOT=true`).
-      * Errore rilevato → **rollback immediato** + eliminazione snapshot fallito.
-
------
-
-## Esempio di Output
 
 ```
-#### AVVIO PROCESSO PER LXC ID 8006 ####
-3.1.1 Pulizia vecchi snapshot con prefisso 'AUTO_UPDATE_SNAP' per LXC 8006...
-3.1.2 Creazione snapshot AUTO_UPDATE_SNAP_20231201120000_8006...
-    -> Aggiornamento selettivo Dockge (/opt/dockge)...
-    -> Avvio/Aggiornamento solo dei servizi attivi: (web api)...
-    -> Aggiornamento selettivo Immich in /opt/immich...
-    -> Nessun servizio attivo trovato. Immagini aggiornate, stato mantenuto (stoppato).
-AGGIORNAMENTO RIUSCITO per LXC 8006.
-Configurazione KEEP_LAST_SNAPSHOT=true: lo snapshot AUTO_UPDATE_SNAP_... viene MANTENUTO.
-```
 
------
+---
 
-## English Documentation 🇬🇧
+## 🚀 Utilizzo
 
-The `update-lxc.sh` script automates updating Docker Compose stacks inside LXC containers on a Proxmox host.
+### 1. Modalità Standard (Consigliata)
 
-### Key Features
+Esegue snapshot, aggiornamento e mantiene l'ultimo stato noto.
 
-  * Automatic Snapshot with Keep Last Option.
-  * **Selective Update:** Updates images but only restarts running containers.
-  * **Clean Mode:** Manual cleanup of old snapshots.
-  * Docker Compose scanning with multiple paths.
-  * Dry Run mode (`--dry-run`).
-
-### Usage
-
-  * Dry Run: `./update-lxc.sh --dry-run 8006`
-  * Live Update: `./update-lxc.sh 8006 8011`
-  * **Cleanup:** `./update-lxc.sh all clean`
-
-### Security and Snapshot Logic
-
-1.  Docker check.
-2.  Old snapshot cleanup.
-3.  New snapshot creation.
-4.  Update stacks (Dockge first, then others).
-5.  Success → snapshot kept (if configured).
-    Failure → rollback + snapshot deletion.
-
------
-
-## Licenza
-
-Questo script è distribuito per uso personale e amministrativo.
-Usalo con cautela: l'opzione `"all"` può modificare tutti i container attivi.
-Si consiglia sempre di eseguire prima un `--dry-run` per verificare cosa verrà modificato.
-
-**Nota:** La funzionalità "Keep Last Snapshot" può occupare spazio su disco. Monitorare periodicamente gli snapshot Proxmox.
+```bash
+./update-lxc.sh 101          # Aggiorna LXC con ID 101
+./update-lxc.sh immich       # Aggiorna LXC con nome contenente "immich"
+./update-lxc.sh all          # Aggiorna TUTTI gli LXC attivi
 
 ```
+
+### 2. Modalità Rapida (Senza Snapshot)
+
+Aggiorna senza creare snapshot di sicurezza.
+
+```bash
+./update-lxc.sh all --no-snap
+
 ```
+
+### 3. Simulazione e Manutenzione
+
+| Comando | Descrizione |
+| --- | --- |
+| `./update-lxc.sh all --dry-run` | Visualizza le azioni senza eseguirle. |
+| `./update-lxc.sh all clean` | Elimina manualmente TUTTI gli snapshot creati dallo script. |
+
+---
+
+## 🛠️ Logica Operativa
+
+1. **Validazione:** Verifica se l'LXC è attivo e se Docker è installato.
+2. **Protezione:** Crea uno snapshot Proxmox (es. `AUTO_UPDATE_SNAP_20251219...`).
+3. **Aggiornamento Dockge:** Priorità alle istanze Dockge definite in `DOCKGE_PATHS`.
+4. **Scansione Stack:** Cerca file `docker-compose.yml` o `compose.yaml` nelle radici configurate.
+5. **Aggiornamento Intelligente:**
+* `docker compose pull`
+* Confronto Image ID (Digest).
+* `docker compose up -d` solo per i servizi che erano già in esecuzione.
+
+
+6. **Esito:**
+* **Successo:** Snapshot mantenuto come backup (se configurato) + `docker image prune` per liberare spazio.
+* **Fallimento:** Rollback automatico allo snapshot e notifica errore.
+
+
+---
+
+### 🌐 Esecuzione Diretta (One-Liner)
+
+Se non vuoi scaricare e gestire localmente lo script, puoi eseguirlo direttamente dal repository GitHub. Questo metodo è utile per avere sempre l'ultima versione disponibile senza dover aggiornare manualmente il file.[!IMPORTANT]Sicurezza: Usa sempre i due trattini -- dopo il comando curl per separare gli argomenti passati allo script da quelli di bash
+
+#### 1. Aggiornamento completo con snapshot (Tutti gli LXC)
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/fcaronte/proxmox_lxc_docker_updater/main/update-lxc.sh)" -- all
+
+```
+
+#### 2. Aggiornamento rapido SENZA snapshot (Tutti gli LXC)
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/fcaronte/proxmox_lxc_docker_updater/main/update-lxc.sh)" -- all --no-snap
+
+```
+
+#### 3. Pulizia totale degli snapshot obsoleti
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/fcaronte/proxmox_lxc_docker_updater/main/update-lxc.sh)" -- clean all
+
+```
+
+#### 4. Simulazione (Dry-run) per un ID specifico
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/fcaronte/proxmox_lxc_docker_updater/main/update-lxc.sh)" -- 101 --dry-run
+
+```
+
+---
+
+## 🇬🇧 English Summary
+
+`update-lxc.sh` is a maintenance script for Proxmox LXC containers running Docker. It ensures safe updates by leveraging Proxmox snapshots.
+
+**Key Flags:**
+
+* `--no-snap`: Skip snapshot creation for faster updates.
+* `--dry-run`: Simulation mode.
+* `clean`: Remove all script-generated snapshots.
+
+**Selective Update Logic:** It only restarts services that were running before the update, keeping your environment's state consistent.
+
+
+---
+
+### 🌐 Direct Execution (One-Liner)
+
+You can run the script directly from the GitHub repository without downloading it. This ensures you are always using the latest version (v1.7.0).
+
+> [!IMPORTANT]
+> **Security:** Always use the double dash `--` after the curl command to separate the script arguments from the bash options.
+
+#### 1. Full Update with Snapshot (All LXCs)
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/fcaronte/proxmox_lxc_docker_updater/main/update-lxc.sh)" -- all
+
+```
+
+#### 2. Fast Update WITHOUT Snapshot (All LXCs)
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/fcaronte/proxmox_lxc_docker_updater/main/update-lxc.sh)" -- all --no-snap
+
+```
+
+#### 3. Total Cleanup of Obsolete Snapshots
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/fcaronte/proxmox_lxc_docker_updater/main/update-lxc.sh)" -- clean all
+
+```
+
+#### 4. Simulation (Dry-run) for a Specific ID
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/fcaronte/proxmox_lxc_docker_updater/main/update-lxc.sh)" -- 101 --dry-run
+
+```
+
+---
+
+### Command Breakdown
+
+* **`curl -fsSL`**: Downloads the script content silently.
+* **`bash -c "$(..." )"`**: Executes the downloaded content directly in memory.
+* **`--`**: Tells Bash that everything following it is an argument for the script itself.
+* **`all`, `clean`, `--no-snap**`: The script parameters to define the execution mode.
+
+
+## 📝 Licenza e Note
+
+Sviluppato con **Gemini AI**. Usare con cautela. L'opzione `all` è potente: si consiglia sempre un `--dry-run` preventivo.
+
+---
+
+**Ti serve altro per completare la tua repository GitHub, come ad esempio un file `.gitignore` o delle istruzioni per l'automazione tramite Cron?**
