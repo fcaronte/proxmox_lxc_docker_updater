@@ -2,12 +2,13 @@
 
 # ======================================================================
 # SCRIPT: update-lxc.sh
-# VERSIONE: 1.8.0 (HA Integration)
+# VERSIONE: 1.8.9 (Restore Header Info + Tag Resolution)
 # ======================================================================
 
 # Crea un file di "lavoro in corso"
 echo $$ > /var/run/update-lxc.pid
-trap "rm -f /var/run/update-lxc.pid" EXIT
+# Reset colori e rimozione PID all'uscita
+trap "echo -ne '\033[0m'; rm -f /var/run/update-lxc.pid" EXIT
 
 # --- USER CONFIG ---
 SCAN_ROOTS="/root /opt/stacks"
@@ -16,11 +17,10 @@ KEEP_LAST_SNAPSHOT=true
 # -------------------
 
 # --- CONFIGURAZIONE VARIABILI INTERNE ---
-SCRIPT_VERSION="1.8.0 (HA Support)"
+SCRIPT_VERSION="1.8.9"
 SNAP_PREFIX="AUTO_UPDATE_SNAP"
 HOST_IP=$(hostname -I | awk '{print $1}')
 
-# Codici colore
 C_DEFAULT='\033[0m'
 C_RED='\033[0;31m'    
 C_GREEN='\033[0;32m'  
@@ -28,9 +28,8 @@ C_YELLOW='\033[1;33m'
 C_CYAN='\033[0;36m'   
 
 declare -a UPDATE_LOGS
-declare -a SUCCESS_LXC_IDS 
 
-# --- GESTIONE ARGOMENTI E MODALITÀ ---
+# --- GESTIONE ARGOMENTI ---
 DRY_RUN=false
 CLEAN_MODE=false
 SKIP_SNAPSHOT=false
@@ -47,61 +46,47 @@ for arg in "$@"; do
     esac
 done
 
-# --- LOGICA HOME ASSISTANT ---
+# Caricamento segreti e setup modalità HA
 if [ "$HA_MODE" = true ]; then
-    if [ -f "/root/ha_secret.conf" ]; then
-        source /root/ha_secret.conf
-    else
-        echo "ERRORE: /root/ha_secret.conf non trovato."
-        exit 1
-    fi
-    # Feedback interattivo immediato per i log di HA
-    if [ "${ARGS[*]}" == "all" ]; then
-        echo "✅ Richiesta ricevuta: Avvio aggiornamento globale di tutti i LXC."
-    else
-        echo "✅ Richiesta ricevuta: Avvio aggiornamento per LXC: ${ARGS[*]}"
-    fi
-    
-    # In modalità HA forziamo l'assenza di colori e log ridotto
+    [ -f "/root/ha_secret.conf" ] && source /root/ha_secret.conf
     C_INFO="" ; C_ERROR="" ; C_SUCCESS="" ; C_WARNING="" ; C_CYAN="" ; C_DEFAULT=""
 fi
 
-# Funzione per stampare log solo se NON siamo in modalità HA
 log_msg() {
-    if [ "$HA_MODE" = false ]; then
-        echo -e "$1"
-    fi
+    if [ "$HA_MODE" = false ]; then echo -e "${1}${C_DEFAULT}"; fi
+}
+
+log_status() {
+    echo -e "$1" >&2
 }
 
 if [ ${#ARGS[@]} -eq 0 ]; then
-    echo "Utilizzo: $0 <ID_LXC|nome_parziale|all> [--dry-run] [--no-snap] [ha]"
+    echo "Utilizzo: $0 <ID_LXC|all> [ha] [--no-snap] [--dry-run]"
     exit 1
 fi
 
-# Questi messaggi appariranno solo nella Shell di Proxmox, non in HA
+# --- MESSAGGI DI INTESTAZIONE (Ripristinati) ---
 log_msg "${C_CYAN}Aggiornamento LXC Docker (v$SCRIPT_VERSION) - Host: $HOST_IP${C_DEFAULT}"
-[ "$CLEAN_MODE" = false ] && log_msg "Radici di Scansione Docker: $SCAN_ROOTS"
-log_msg "--------------------------------------------------------"
+[ "$DRY_RUN" = true ] && log_msg "${C_YELLOW}*** MODALITÀ DRY-RUN ATTIVA (Nessuna modifica reale) ***${C_DEFAULT}"
+[ "$SKIP_SNAPSHOT" = true ] && log_msg "${C_YELLOW}*** SNAPSHOT DISABILITATI (--no-snap) ***${C_DEFAULT}"
+[ "$CLEAN_MODE" = true ] && log_msg "${C_CYAN}Modalità Pulizia Snapshot attiva.${C_DEFAULT}"
 
 # ======================================================================
-# FUNZIONI GENERALI
+# FUNZIONI CORE
 # ======================================================================
 
 esegui_remoto() {
     local ID=$1
     local CMD=$2
-    local FINAL_CMD="export LC_ALL=C.UTF-8 && $CMD" 
-    pct exec "$ID" -- bash -c "$FINAL_CMD" 2>/dev/null
-    return $?
+    pct exec "$ID" -- bash -c "export LC_ALL=C.UTF-8 && $CMD" 2>/dev/null
 }
 
 trova_lxc_ids() {
     local SEARCH_TERMS=("$@")
     local ACTIVE_IDS=$(pct list | awk 'NR>1 {print $1}' || true)
     local FILTERED_IDS=()
-    [ -z "$ACTIVE_IDS" ] && return
     for TERM in "${SEARCH_TERMS[@]}"; do
-        if [ "$TERM" == "all" ]; then FILTERED_IDS=($ACTIVE_IDS); break; fi
+        if [ "$TERM" == "all" ]; then FILTERED_IDS+=($ACTIVE_IDS); break; fi
         for ID in $ACTIVE_IDS; do
             if [ "$ID" == "$TERM" ]; then FILTERED_IDS+=("$ID"); continue; fi
             local HOSTNAME=$(pct config "$ID" | grep 'hostname' | awk '{print $2}' || true)
@@ -111,214 +96,155 @@ trova_lxc_ids() {
     echo "${FILTERED_IDS[@]}" | tr ' ' '\n' | sort -u | tr '\n' ' '
 }
 
-# ======================================================================
-# GESTIONE SNAPSHOT E PULIZIA
-# ======================================================================
-
-esegui_docker_prune() {
-    local ID=$1
-    log_msg "${C_CYAN}   Avvio pulizia spazio Docker su LXC $ID...${C_DEFAULT}"
-    [ "$DRY_RUN" = true ] && return 0
-    esegui_remoto "$ID" "docker container prune -f && docker image prune -a -f" &>/dev/null
-}
-
-pulisci_snapshot_manuale() {
-    local ID=$1
-    local NOME=$(pct config $ID | grep 'hostname' | awk '{print $2}' || echo "LXC $ID")
-    log_msg "${C_CYAN}#### PULIZIA MANUALE SNAPSHOT LXC $ID ($NOME) ####${C_DEFAULT}"
-    local SNAPS=$(pct listsnapshot $ID | grep "$SNAP_PREFIX" | grep -v 'current' | grep -o "$SNAP_PREFIX[^[:space:]]*" || true)
-    local SNAPS_ARRAY=($SNAPS)
-    for (( i = ${#SNAPS_ARRAY[@]} - 1; i >= 0; i-- )); do
-        local S=${SNAPS_ARRAY[i]}
-        log_msg "   -> Rimozione $S..."
-        [ "$DRY_RUN" = false ] && pct delsnapshot "$ID" "$S" &>/dev/null
-    done
-}
-
-pulisci_old_snap_n1() {
-    local ID=$1
-    local ALL_SNAPS=$(pct listsnapshot $ID | grep "$SNAP_PREFIX" | grep -v 'current' | grep -o "$SNAP_PREFIX[^[:space:]]*" || true)
-    local SNAPS_ARRAY=($ALL_SNAPS)
-    [ ${#SNAPS_ARRAY[@]} -le 1 ] && return 0
-    local KEEP=${SNAPS_ARRAY[-1]}
-    for (( i = ${#SNAPS_ARRAY[@]} - 2; i >= 0; i-- )); do
-        local S=${SNAPS_ARRAY[i]}
-        log_msg "   Rimozione snapshot obsoleto: $S..."
-        [ "$DRY_RUN" = false ] && pct delsnapshot "$ID" "$S" &>/dev/null
-    done
-}
-
 crea_snapshot() {
     local ID=$1
     local NAME="${SNAP_PREFIX}_$(date +%Y%m%d%H%M%S)_${ID}"
-    log_msg "${C_CYAN}Creazione snapshot $NAME...${C_DEFAULT}"
+    log_status "${C_CYAN}Creazione snapshot $NAME...${C_DEFAULT}"
     if [ "$DRY_RUN" = true ]; then echo "$NAME"; return 0; fi
-    if pct snapshot $ID "$NAME" 2>/dev/null; then
+    if pct snapshot $ID "$NAME" &>/dev/null; then
         echo "$NAME"
         return 0
     else
-        log_msg "${C_RED}ERRORE: Impossibile creare snapshot.${C_DEFAULT}"
+        log_status "${C_RED}ERRORE snapshot.${C_DEFAULT}"
         return 1
     fi
 }
 
 esegui_rollback() {
     local ID=$1
-    local SNAP=$2
-    log_msg "${C_RED}#### FALLIMENTO! AVVIO ROLLBACK A $SNAP ####${C_DEFAULT}"
-    [ "$DRY_RUN" = true ] && return 0
-    pct rollback $ID $SNAP && pct delsnapshot $ID $SNAP
+    local RAW_SNAP=$2
+    local CLEAN_SNAP=$(echo "$RAW_SNAP" | grep -o "${SNAP_PREFIX}_[0-9]*_${ID}" | tail -n 1)
+    if [ -z "$CLEAN_SNAP" ]; then return 1; fi
+    log_status "${C_RED}#### ROLLBACK LXC $ID A $CLEAN_SNAP ####${C_DEFAULT}"
+    pct rollback $ID "$CLEAN_SNAP"
+    pct start $ID
+    pct delsnapshot $ID "$CLEAN_SNAP"
 }
-
-# ======================================================================
-# LOGICA DI AGGIORNAMENTO
-# ======================================================================
 
 aggiorna_stack() {
     local ID=$1
     local PATH_STACK=$2
     local NOME_STACK=$3
-    local EXIT_STATUS=0
-    
-    local COMPOSE_FILE=$(esegui_remoto "$ID" "find \"$PATH_STACK\" -maxdepth 1 -type f \( -name \"docker-compose.yml\" -o -name \"docker-compose.yaml\" -o -name \"compose.yml\" -o -name \"compose.yaml\" \) -print -quit 2>/dev/null || true")
-    [ -z "$COMPOSE_FILE" ] && return 0
 
-    log_msg "   -> ${C_CYAN}Check $NOME_STACK...${C_DEFAULT}"
-    [ "$DRY_RUN" = true ] && return 0
-    
-    local ACTIVE_SERVICES=$(esegui_remoto "$ID" "cd \"$PATH_STACK\" && docker compose ps --services --filter \"status=running\" | xargs || true")
-    
-    # Prendo il digest/ID dell'immagine prima del pull
-    local PRE_ID=$(esegui_remoto "$ID" "cd \"$PATH_STACK\" && docker compose images -q | head -n 1 || true")
+    local CHECK=$(esegui_remoto "$ID" "[ -d \"$PATH_STACK\" ] && echo 'ok'")
+    [ "$CHECK" != "ok" ] && return 0
 
-    if ! esegui_remoto "$ID" "cd \"$PATH_STACK\" && docker compose pull -q"; then return 1; fi
-    
-    local POST_ID=$(esegui_remoto "$ID" "cd \"$PATH_STACK\" && docker compose images -q | head -n 1 || true")
-    
-    local UPDATED_IMG=""
-    [ "$PRE_ID" != "$POST_ID" ] && UPDATED_IMG="Immagini nuove"
+    log_status "      Check $NOME_STACK..."
 
-    local TOUCHED=""
-    if [ -n "$ACTIVE_SERVICES" ]; then
-        # Se acceso, aggiorniamo e riavviamo
-        local UP_OUT=$(esegui_remoto "$ID" "cd \"$PATH_STACK\" && docker compose up -d $ACTIVE_SERVICES" 2>&1)
-        [ $? -ne 0 ] && EXIT_STATUS=1
-        TOUCHED=$(echo "$UP_OUT" | grep -E 'Started|Restarted|Created' | grep 'Container' | sed 's/\[+\] Container //g' | xargs -I {} echo "{}" | tr '\n' ' ' || true)
-    else
-        # Se spento, aggiorniamo solo i container internamente
-        esegui_remoto "$ID" "cd \"$PATH_STACK\" && docker compose create" &>/dev/null
-        TOUCHED="Nessun riavvio (Stoppato)"
+    local RUNNING_BEFORE=$(esegui_remoto "$ID" "cd \"$PATH_STACK\" && docker compose ps --format '{{.Service}}' --filter \"status=running\" 2>/dev/null" | xargs)
+    local PRE_IDS=$(esegui_remoto "$ID" "cd \"$PATH_STACK\" && docker compose ps -a -q | xargs -r docker inspect --format='{{.Image}}' 2>/dev/null | sed 's/sha256://g' | sort -u | xargs")
+
+    if ! esegui_remoto "$ID" "cd \"$PATH_STACK\" && docker compose pull -q"; then
+        log_status "${C_RED}      ✖ Errore Pull su $NOME_STACK${C_DEFAULT}"
+        return 1 
     fi
+    
+    local POST_IDS=$(esegui_remoto "$ID" "cd \"$PATH_STACK\" && docker compose config --images 2>/dev/null | xargs -r docker inspect --format='{{.Id}}' 2>/dev/null | sed 's/sha256://g' | sort -u | xargs")
 
-    if [ "$EXIT_STATUS" -eq 0 ]; then
-        if [ "$PRE_ID" != "$POST_ID" ]; then
-            UPDATE_LOGS+=("✅ LXC $ID - $NOME_STACK: Aggiornato ($TOUCHED)")
-        else
-            UPDATE_LOGS+=("🟡 LXC $ID - $NOME_STACK: Nessuna modifica.")
+    if [ -n "$POST_IDS" ] && [ "$PRE_IDS" != "$POST_IDS" ]; then
+        log_status "${C_GREEN}      ✔ Aggiornamento trovato per $NOME_STACK!${C_DEFAULT}"
+        
+        if [ "$DRY_RUN" = true ]; then
+            UPDATE_LOGS+=("✅ LXC $ID - $NOME_STACK: Disponibile (Dry Run)")
+            return 0
         fi
+
+        local UP_OUT=$(esegui_remoto "$ID" "cd \"$PATH_STACK\" && docker compose up -d 2>&1")
+        if [ $? -eq 0 ]; then
+            local ALL_SERVICES=$(esegui_remoto "$ID" "cd \"$PATH_STACK\" && docker compose config --services 2>/dev/null")
+            for SERVICE in $ALL_SERVICES; do
+                if [[ ! " $RUNNING_BEFORE " =~ " $SERVICE " ]]; then
+                    log_status "      ℹ Ripristino stato: fermo $SERVICE..."
+                    esegui_remoto "$ID" "cd \"$PATH_STACK\" && docker compose stop $SERVICE" > /dev/null 2>&1
+                fi
+            done
+
+            local UPDATED_NAMES=$(echo "$UP_OUT" | grep -E 'Recreated|Started|Created' | sed -E 's/.*Container //;s/ .*//' | sort -u | paste -sd ", " -)
+            [ -z "$UPDATED_NAMES" ] && UPDATED_NAMES="Servizi aggiornati"
+            UPDATE_LOGS+=("✅ LXC $ID - $NOME_STACK: $UPDATED_NAMES")
+            return 0
+        else
+            log_status "${C_RED}      ✖ Errore Up su $NOME_STACK${C_DEFAULT}"
+            return 1
+        fi
+    else
+        UPDATE_LOGS+=("🟡 LXC $ID - $NOME_STACK: Nessuna modifica.")
         return 0
     fi
-    return 1
 }
 
 processa_lxc() {
     local ID=$1
     local NOME=$(pct config $ID | grep 'hostname' | awk '{print $2}' || echo "LXC $ID")
-    local SNAP_NAME=""
-    
     log_msg "--------------------------------------------------------"
-    log_msg "${C_CYAN}#### AVVIO PROCESSO PER LXC ID $ID ($NOME) ####${C_DEFAULT}"
+    log_msg "${C_CYAN}#### PROCESSO LXC $ID ($NOME) ####${C_DEFAULT}"
     
-    [ "$(pct status $ID)" != "status: running" ] && { log_msg "LXC non in esecuzione. Salto."; return 0; }
+    [ "$(pct status $ID)" != "status: running" ] && return 0
     
+    local SNAP_NAME=""
     if [ "$SKIP_SNAPSHOT" = false ]; then
         SNAP_NAME=$(crea_snapshot $ID)
         [ $? -ne 0 ] && return 1
     fi
     
     local FAILED=false
-    # 1. Dockge
     for D_PATH in $DOCKGE_PATHS; do
         if ! aggiorna_stack "$ID" "$D_PATH" "Dockge"; then FAILED=true; break; fi
     done
-    # 2. Altri Stack
+    
     if [ "$FAILED" = false ]; then
-        for ROOT in $SCAN_ROOTS; do
-            local STACKS=$(esegui_remoto "$ID" "find \"$ROOT\" -mindepth 1 -maxdepth 2 -type f -regex \".*\(docker-compose\|compose\).y\(a\)?ml\" -print0 2>/dev/null | xargs -0 -I {} dirname {} | sort -u || true")
-            for P in $STACKS; do
-                local SKIP_S=false
-                for D in $DOCKGE_PATHS; do [ "$P" == "$D" ] && SKIP_S=true; done
-                [ "$SKIP_S" = true ] && continue
-                if ! aggiorna_stack "$ID" "$P" "$(basename "$P")"; then FAILED=true; break 2; fi
-            done
+        local STACKS=$(esegui_remoto "$ID" "find $SCAN_ROOTS -mindepth 1 -maxdepth 2 -type f -regex \".*\(docker-compose\|compose\).y\(a\)?ml\" -print0 2>/dev/null | xargs -0 -I {} dirname {} | sort -u")
+        for P in $STACKS; do
+            local SKIP_S=false
+            for D in $DOCKGE_PATHS; do [[ "$P" == "$D"* ]] && SKIP_S=true; done
+            [ "$SKIP_S" = true ] && continue
+            if ! aggiorna_stack "$ID" "$P" "$(basename "$P")"; then FAILED=true; break; fi
         done
     fi
 
     if [ "$FAILED" = true ]; then
         [ -n "$SNAP_NAME" ] && esegui_rollback "$ID" "$SNAP_NAME"
+        UPDATE_LOGS=("${UPDATE_LOGS[@]/%✅ LXC $ID*/❌ LXC $ID - Rollback effettuato}")
         return 1
     fi
     
-    SUCCESS_LXC_IDS+=("$ID")
-    [ "$KEEP_LAST_SNAPSHOT" = true ] && [ -n "$SNAP_NAME" ] && pulisci_old_snap_n1 "$ID"
-    esegui_docker_prune "$ID"
+    if [ "$KEEP_LAST_SNAPSHOT" = true ] && [ -n "$SNAP_NAME" ]; then
+        local OLD_SNAPS=$(pct listsnapshot $ID | awk '{print $2}' | grep "^$SNAP_PREFIX" | grep -v "$SNAP_NAME" || true)
+        for OS in $OLD_SNAPS; do pct delsnapshot $ID $OS &>/dev/null; done
+    fi
+    
+    esegui_remoto "$ID" "docker image prune -af" >/dev/null
     return 0
 }
 
 # ======================================================================
-# LOOP PRINCIPALE E REPORT
+# REPORT E NOTIFICA
 # ======================================================================
 
 LXC_IDS=$(trova_lxc_ids "${ARGS[@]}")
 [ -z "$LXC_IDS" ] && { echo "Nessun LXC trovato."; exit 1; }
 
-if [ "$CLEAN_MODE" = true ]; then
-    for ID in $LXC_IDS; do pulisci_snapshot_manuale "$ID"; done
-    exit 0
-fi
-
 for ID in $LXC_IDS; do processa_lxc "$ID"; done
 
-# Costruzione report finale
-REPORT_OUT=""
+REPORT_TEXT=""
 UPDATED_COUNT=0
 for ENTRY in "${UPDATE_LOGS[@]}"; do
     if [[ "$ENTRY" == "✅"* ]]; then
-        # IMPORTANTE: Rimuoviamo eventuali caratteri che possono rompere il JSON
-        CLEAN_ENTRY=$(echo "$ENTRY" | tr -d '"' | tr -d "'")
-        REPORT_OUT+="$CLEAN_ENTRY\n"
+        REPORT_TEXT+="${ENTRY}\n"
         ((UPDATED_COUNT++))
     fi
 done
 
-# Invio notifica se in modalità HA
 if [ "$HA_MODE" = true ]; then
-    if [ $UPDATED_COUNT -eq 0 ]; then
-        MSG="Script completato: nessun aggiornamento trovato per LXC: ${ARGS[*]}"
-    else
-        MSG="Aggiornamenti completati su $(hostname):\n$REPORT_OUT"
-    fi
-
-    # --- CORREZIONE JSON PER HA ---
-    # Pulizia caratteri per evitare che il payload si rompa
-    JSON_MSG=$(echo -e "$MSG" | sed ':a;N;$!ba;s/\n/\\n/g' | sed 's/"/\\"/g')
-    TITOLO_NOTIFICA="Proxmox Update $(hostname)"
-
-    # Tentativo di invio (con timeout e retry minimo per evitare salti durante i riavvii LXC)
-    curl -k -s --connect-timeout 5 --retry 3 -X POST \
-         -H "Authorization: $HA_TOKEN" \
-         -H "Content-Type: application/json" \
-         -d "{\"title\": \"$TITOLO_NOTIFICA\", \"message\": \"$JSON_MSG\"}" \
+    MSG_BODY=$(echo -e "${REPORT_TEXT:-Nessun aggiornamento rilevato.}")
+    JSON_PAYLOAD=$(echo "$MSG_BODY" | sed ':a;N;$!ba;s/\n/\\n/g' | sed 's/"/\\"/g')
+    curl -k -s -X POST -H "Authorization: $HA_TOKEN" -H "Content-Type: application/json" \
+         -d "{\"title\": \"Proxmox Update $(hostname)\", \"message\": \"$JSON_PAYLOAD\"}" \
          "$HA_URL" > /dev/null
-
-    echo "DONE: Aggiornamento completato su $(hostname)."
+    echo "DONE: Processo completato. $UPDATED_COUNT stack aggiornati."
 else
-
-    # Report normale a video
-    echo -e "\n========================================================"
-    echo -e "===== REPORT FINALE AGGIORNAMENTO ====="
-    for ENTRY in "${UPDATE_LOGS[@]}"; do
-        [[ "$ENTRY" == "✅"* ]] && echo -e "${C_GREEN}${ENTRY}${C_DEFAULT}" || echo -e "${C_YELLOW}${ENTRY}${C_DEFAULT}"
+    echo -e "\n--- REPORT FINALE ---"
+    for E in "${UPDATE_LOGS[@]}"; do
+        [[ "$E" == "✅"* ]] && echo -e "${C_GREEN}$E${C_DEFAULT}" || echo -e "${C_YELLOW}$E${C_DEFAULT}"
     done
-    echo "========================================================"
 fi
