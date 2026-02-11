@@ -1,191 +1,216 @@
+## 🌍 Language / Lingua
+* [🇮🇹 Leggi in Italiano](#-proxmox-lxc-docker-updater-italiano)
+* [🇬🇧 Read in English](#-proxmox-lxc-docker-updater-english)
+
 ---
 
-# SCRIPT update-lxc.sh (v1.7.0)
+# 🇮🇹 Proxmox LXC Docker Updater (Italiano)
+```markdown
+# 🚀 Proxmox LXC Docker Updater (v1.8.9+)
 
-Script professionale e robusto per automatizzare l'aggiornamento degli stack **Docker Compose** all'interno dei container **LXC** su host **Proxmox**.
+[![Bash Script](https://img.shields.io/badge/language-Bash-4EAA25.svg)](https://www.gnu.org/software/bash/)
+[![Proxmox](https://img.shields.io/badge/Platform-Proxmox-E57020.svg)](https://www.proxmox.com)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Sviluppato per garantire la massima sicurezza operativa attraverso l'integrazione nativa con le API di Proxmox.
+Script professionale per l'aggiornamento automatizzato di stack **Docker Compose** all'interno di container **LXC Proxmox**. Gestisce snapshot, rollback e integrazione nativa con **Home Assistant**.
 
 ---
 
 ## 🌟 Caratteristiche Principali
 
-* **Sicurezza con Snapshot:** Crea automaticamente uno snapshot Proxmox prima di ogni modifica.
-* **Rollback Automatico:** In caso di errore durante l'aggiornamento, lo script esegue il rollback istantaneo allo stato precedente.
-* **Novità: Modalità No-Snap (`--no-snap`):** Permette aggiornamenti rapidi senza creare snapshot (utile per container non critici o con poco spazio disco).
-* **Aggiornamento Selettivo:** Rileva quali container sono "Running" e aggiorna/riavvia solo quelli, lasciando i container fermi nel loro stato originale (ma con le immagini aggiornate).
-* **Logica Digest (v1.6.5+):** Verifica l'Image ID reale di Docker per confermare se un aggiornamento è avvenuto effettivamente.
-* **Multi-Path & Dockge:** Supporto nativo per installazioni multiple di Dockge e scansione di directory multiple (es. `/root` e `/opt`).
+* **Deep Tag Resolution**: Confronta l'ID dell'immagine in esecuzione con l'ID reale sul disco dopo il pull. Risolve il problema dei falsi aggiornamenti con tag `:latest`.
+* **Smart State Restoration**: Rispetta lo stato dei tuoi servizi. Se un container era spento prima dell'aggiornamento, verrà riportato allo stato *stopped* automaticamente.
+* **Integrazione Home Assistant (HA)**: Modalità `ha` dedicata che silenzia l'output SSH (evitando timeout) e invia una notifica push con il report finale.
+* **Sicurezza Integrata**: 
+    * Snapshot automatico del LXC prima di ogni operazione.
+    * **Rollback automatico** con riavvio del LXC in caso di errore durante il pull o l'avvio.
+    * Report intelligente: se un LXC fallisce, i successi parziali vengono segnalati come annullati nel log.
+* **Auto-Cleanup**: Esegue `docker image prune` alla fine di ogni aggiornamento riuscito per risparmiare spazio.
 
 ---
 
-## ⚙️ Configurazione Iniziale
+## 🔑 Requisiti per Home Assistant
 
-Modifica le variabili nella sezione **USER CONFIG** all'inizio dello script:
+Per controllare gli aggiornamenti dall'App di HA, configura Proxmox come segue:
 
-| Variabile | Descrizione | Default |
-| --- | --- | --- |
-| **SCAN_ROOTS** | Directory dove cercare file `compose.yml` (scansione profonda 2 livelli). | `/root /opt/stacks` |
-| **DOCKGE_PATHS** | Percorsi specifici per Dockge. | `/root/dockge_install/dockge /opt/dockge` |
-| **KEEP_LAST_SNAPSHOT** | Se `true`, mantiene l'ultimo snapshot di successo come backup. | `true` |
+1.  **Accesso SSH senza password**: La chiave pubblica di HA deve essere presente in `/root/.ssh/authorized_keys` su Proxmox.
+2.  **File dei Segreti**: Crea il file `/root/ha_secret.conf` su Proxmox:
+    ```bash
+    HA_URL="[https://tuo-ha.duckdns.org/api/services/notify/mobile_app_tuo_smartphone](https://tuo-ha.duckdns.org/api/services/notify/mobile_app_tuo_smartphone)"
+    HA_TOKEN="Bearer TUO_TOKEN_LONG_LIVED"
+    ```
 
-### Permessi
+---
 
-```bash
-chmod +x update-lxc.sh
+## 🤖 Configurazione su Home Assistant
+
+### 1. Shell Command
+Aggiungi al tuo `configuration.yaml`:
+```yaml
+shell_command:
+  aggiorna_lxc: 'ssh -i /config/.ssh/id_rsa -o StrictHostKeyChecking=no root@IP_PROXMOX "bash /root/update-lxc.sh {{ lxc_id }} ha"'
+
+```
+
+### 2. Script (Esempio)
+
+Crea uno script nell'interfaccia di HA per richiamare il comando:
+
+```yaml
+alias: Aggiorna Immich
+sequence:
+  - action: shell_command.aggiorna_lxc
+    data:
+      lxc_id: "immich" # Può essere l'ID numerico o il nome del LXC
 
 ```
 
 ---
 
-## 🚀 Utilizzo
+## 🚀 Esecuzione Diretta (CLI)
 
-### 1. Modalità Standard (Consigliata)
-
-Esegue snapshot, aggiornamento e mantiene l'ultimo stato noto.
-
-```bash
-./update-lxc.sh 101          # Aggiorna LXC con ID 101
-./update-lxc.sh immich       # Aggiorna LXC con nome contenente "immich"
-./update-lxc.sh all          # Aggiorna TUTTI gli LXC attivi
-
-```
-
-### 2. Modalità Rapida (Senza Snapshot)
-
-Aggiorna senza creare snapshot di sicurezza.
-
-```bash
-./update-lxc.sh all --no-snap
-
-```
-
-### 3. Simulazione e Manutenzione
+Puoi eseguire lo script direttamente dal terminale di Proxmox usando i seguenti comandi:
 
 | Comando | Descrizione |
 | --- | --- |
-| `./update-lxc.sh all --dry-run` | Visualizza le azioni senza eseguirle. |
-| `./update-lxc.sh all clean` | Elimina manualmente TUTTI gli snapshot creati dallo script. |
+| `update-lxc.sh all` | Aggiorna tutti i LXC rilevati. |
+| `update-lxc.sh 100` | Aggiorna solo il LXC con ID 100. |
+| `update-lxc.sh all ha` | Aggiorna tutto e invia notifica push a HA. |
+| `update-lxc.sh all --dry-run` | Simula l'operazione senza modificare nulla. |
+| `update-lxc.sh all --no-snap` | Esegue l'aggiornamento senza creare snapshot. |
 
----
-
-## 🛠️ Logica Operativa
-
-1. **Validazione:** Verifica se l'LXC è attivo e se Docker è installato.
-2. **Protezione:** Crea uno snapshot Proxmox (es. `AUTO_UPDATE_SNAP_20251219...`).
-3. **Aggiornamento Dockge:** Priorità alle istanze Dockge definite in `DOCKGE_PATHS`.
-4. **Scansione Stack:** Cerca file `docker-compose.yml` o `compose.yaml` nelle radici configurate.
-5. **Aggiornamento Intelligente:**
-* `docker compose pull`
-* Confronto Image ID (Digest).
-* `docker compose up -d` solo per i servizi che erano già in esecuzione.
-
-
-6. **Esito:**
-* **Successo:** Snapshot mantenuto come backup (se configurato) + `docker image prune` per liberare spazio.
-* **Fallimento:** Rollback automatico allo snapshot e notifica errore.
-
-
----
-
-### 🌐 Esecuzione Diretta (One-Liner)
-
-Se non vuoi scaricare e gestire localmente lo script, puoi eseguirlo direttamente dal repository GitHub. Questo metodo è utile per avere sempre l'ultima versione disponibile senza dover aggiornare manualmente il file.[!IMPORTANT]Sicurezza: Usa sempre i due trattini -- dopo il comando curl per separare gli argomenti passati allo script da quelli di bash
-
-#### 1. Aggiornamento completo con snapshot (Tutti gli LXC)
+### One-Liner per l'aggiornamento rapido:
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/fcaronte/proxmox_lxc_docker_updater/main/update-lxc.sh)" -- all
-
-```
-
-#### 2. Aggiornamento rapido SENZA snapshot (Tutti gli LXC)
-
-```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/fcaronte/proxmox_lxc_docker_updater/main/update-lxc.sh)" -- all --no-snap
-
-```
-
-#### 3. Pulizia totale degli snapshot obsoleti
-
-```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/fcaronte/proxmox_lxc_docker_updater/main/update-lxc.sh)" -- clean all
-
-```
-
-#### 4. Simulazione (Dry-run) per un ID specifico
-
-```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/fcaronte/proxmox_lxc_docker_updater/main/update-lxc.sh)" -- 101 --dry-run
+bash -c "$(curl -fsSL [https://raw.githubusercontent.com/fcaronte/proxmox_lxc_docker_updater/main/update-lxc.sh](https://raw.githubusercontent.com/fcaronte/proxmox_lxc_docker_updater/main/update-lxc.sh))" -- all ha
 
 ```
 
 ---
 
-## 🇬🇧 English Summary
+## 📋 Note Tecniche
 
-`update-lxc.sh` is a maintenance script for Proxmox LXC containers running Docker. It ensures safe updates by leveraging Proxmox snapshots.
+Lo script scansiona automaticamente le cartelle configurate in `SCAN_ROOTS` (default: `/root` e `/opt/stacks`) alla ricerca di file `docker-compose.yml` o `compose.yaml`.
 
-**Key Flags:**
+### Gestione Rollback
 
-* `--no-snap`: Skip snapshot creation for faster updates.
-* `--dry-run`: Simulation mode.
-* `clean`: Remove all script-generated snapshots.
+Se lo script rileva un errore durante il `docker compose up`, eseguirà immediatamente:
 
-**Selective Update Logic:** It only restarts services that were running before the update, keeping your environment's state consistent.
-
-
----
-
-### 🌐 Direct Execution (One-Liner)
-
-You can run the script directly from the GitHub repository without downloading it. This ensures you are always using the latest version (v1.7.0).
-
-> [!IMPORTANT]
-> **Security:** Always use the double dash `--` after the curl command to separate the script arguments from the bash options.
-
-#### 1. Full Update with Snapshot (All LXCs)
-
-```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/fcaronte/proxmox_lxc_docker_updater/main/update-lxc.sh)" -- all
-
-```
-
-#### 2. Fast Update WITHOUT Snapshot (All LXCs)
-
-```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/fcaronte/proxmox_lxc_docker_updater/main/update-lxc.sh)" -- all --no-snap
-
-```
-
-#### 3. Total Cleanup of Obsolete Snapshots
-
-```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/fcaronte/proxmox_lxc_docker_updater/main/update-lxc.sh)" -- clean all
-
-```
-
-#### 4. Simulation (Dry-run) for a Specific ID
-
-```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/fcaronte/proxmox_lxc_docker_updater/main/update-lxc.sh)" -- 101 --dry-run
-
-```
+1. `pct rollback` all'istante precedente l'inizio.
+2. `pct start` per assicurare la continuità del servizio.
+3. Notifica HA con prefisso `❌` per gli stack annullati.
 
 ---
 
-### Command Breakdown
+## 📝 Licenza
 
-* **`curl -fsSL`**: Downloads the script content silently.
-* **`bash -c "$(..." )"`**: Executes the downloaded content directly in memory.
-* **`--`**: Tells Bash that everything following it is an argument for the script itself.
-* **`all`, `clean`, `--no-snap**`: The script parameters to define the execution mode.
+Sviluppato con il supporto di **Gemini AI**.
+Distribuito sotto licenza MIT. Usare con cautela: si consiglia sempre un `--dry-run` prima di aggiornamenti massivi.
 
 
-## 📝 Licenza e Note
+# 🇬🇧 Proxmox LXC Docker Updater (English)
 
-Sviluppato con **Gemini AI**. Usare con cautela. L'opzione `all` è potente: si consiglia sempre un `--dry-run` preventivo.
+
+```markdown
+# 🚀 Proxmox LXC Docker Updater (v1.8.9+)
+
+[![Bash Script](https://img.shields.io/badge/language-Bash-4EAA25.svg)](https://www.gnu.org/software/bash/)
+[![Proxmox](https://img.shields.io/badge/Platform-Proxmox-E57020.svg)](https://www.proxmox.com)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+A professional script for automated updates of **Docker Compose** stacks running inside **Proxmox LXC** containers. It features snapshot management, automatic rollback, and native **Home Assistant** integration.
 
 ---
 
-**Ti serve altro per completare la tua repository GitHub, come ad esempio un file `.gitignore` o delle istruzioni per l'automazione tramite Cron?**
+## 🌟 Key Features
+
+* **Deep Tag Resolution**: Compares the running image ID with the actual on-disk ID after pull. Solves the "fake update" issue with `:latest` tags.
+* **Smart State Restoration**: Respects your service states. If a container was stopped before the update, it will be automatically stopped again after the update is completed.
+* **Home Assistant (HA) Integration**: Dedicated `ha` mode that silences SSH output (preventing timeouts) and sends a push notification with the final report.
+* **Safety First**: 
+    * Automatic LXC snapshot before any operation.
+    * **Automatic Rollback**: Reverts to the previous state and restarts the LXC if an error occurs during pull or startup.
+    * Intelligent Reporting: If an LXC update fails, any partial successes are marked as "Reverted" in the logs.
+* **Auto-Cleanup**: Runs `docker image prune` after every successful update to save disk space.
+
+---
+
+## 🔑 Home Assistant Prerequisites
+
+To trigger updates from the HA App, configure Proxmox as follows:
+
+1.  **Passwordless SSH Access**: HA's public key must be added to `/root/.ssh/authorized_keys` on your Proxmox host.
+2.  **Secrets File**: Create the file `/root/ha_secret.conf` on Proxmox:
+    ```bash
+    HA_URL="[https://your-ha.duckdns.org/api/services/notify/mobile_app_your_smartphone](https://your-ha.duckdns.org/api/services/notify/mobile_app_your_smartphone)"
+    HA_TOKEN="Bearer YOUR_LONG_LIVED_TOKEN"
+    ```
+
+---
+
+## 🤖 Home Assistant Setup
+
+### 1. Shell Command
+Add this to your `configuration.yaml`:
+```yaml
+shell_command:
+  update_lxc: 'ssh -i /config/.ssh/id_rsa -o StrictHostKeyChecking=no root@PROXMOX_IP "bash /root/update-lxc.sh {{ lxc_id }} ha"'
+
+```
+
+### 2. Script (Example)
+
+Create a script in the HA UI to trigger the command:
+
+```yaml
+alias: Update Immich
+sequence:
+  - action: shell_command.update_lxc
+    data:
+      lxc_id: "immich" # Can be the numerical ID or the LXC hostname
+
+```
+
+---
+
+## 🚀 CLI Execution
+
+You can run the script directly from the Proxmox terminal:
+
+| Command | Description |
+| --- | --- |
+| `update-lxc.sh all` | Updates all detected LXCs. |
+| `update-lxc.sh 100` | Updates only the LXC with ID 100. |
+| `update-lxc.sh all ha` | Updates all and sends a push notification to HA. |
+| `update-lxc.sh all --dry-run` | Simulates the operation without making changes. |
+| `update-lxc.sh all --no-snap` | Runs the update without creating snapshots. |
+
+### Quick One-Liner:
+
+```bash
+bash -c "$(curl -fsSL [https://raw.githubusercontent.com/fcaronte/proxmox_lxc_docker_updater/main/update-lxc.sh](https://raw.githubusercontent.com/fcaronte/proxmox_lxc_docker_updater/main/update-lxc.sh))" -- all ha
+
+```
+
+---
+
+## 📋 Technical Notes
+
+The script automatically scans paths configured in `SCAN_ROOTS` (default: `/root` and `/opt/stacks`) for `docker-compose.yml` or `compose.yaml` files.
+
+### Rollback Management
+
+If the script detects an error during `docker compose up`, it immediately executes:
+
+1. `pct rollback` to the state before the update started.
+2. `pct start` to ensure service continuity.
+3. HA Notification with a `❌` prefix for the reverted stacks.
+
+---
+
+## 📝 License
+
+Developed with support from **Gemini AI**.
+Distributed under the MIT License. Use with caution: always perform a `--dry-run` before mass updates.
+
+```
