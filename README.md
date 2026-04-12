@@ -1,216 +1,160 @@
-## 🌍 Language / Lingua
-* [🇮🇹 Leggi in Italiano](#-proxmox-lxc-docker-updater-italiano)
-* [🇬🇧 Read in English](#-proxmox-lxc-docker-updater-english)
 
----
+-----
+
+# 🌍 Language / Lingua
+
+  * [🇮🇹 Leggi in Italiano](https://www.google.com/search?q=%23-proxmox-lxc-docker-updater-italiano)
+  * [🇬🇧 Read in English](https://www.google.com/search?q=%23-proxmox-lxc-docker-updater-english)
+
+-----
 
 # 🇮🇹 Proxmox LXC Docker Updater (Italiano)
-```markdown
-# 🚀 Proxmox LXC Docker Updater (v1.8.9+)
+
+````markdown
+# 🚀 Proxmox LXC Docker Updater (v1.9.0+)
 
 [![Bash Script](https://img.shields.io/badge/language-Bash-4EAA25.svg)](https://www.gnu.org/software/bash/)
 [![Proxmox](https://img.shields.io/badge/Platform-Proxmox-E57020.svg)](https://www.proxmox.com)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Script professionale per l'aggiornamento automatizzato di stack **Docker Compose** all'interno di container **LXC Proxmox**. Gestisce snapshot, rollback e integrazione nativa con **Home Assistant**.
+Script avanzato per l'aggiornamento automatizzato di container Docker all'interno di LXC Proxmox. Questa versione introduce un'interfaccia grafica interattiva e una gestione intelligente della pulizia degli snapshot.
 
 ---
 
-## 🌟 Caratteristiche Principali
+## 🌟 Novità Versione 1.9.x
 
-* **Deep Tag Resolution**: Confronta l'ID dell'immagine in esecuzione con l'ID reale sul disco dopo il pull. Risolve il problema dei falsi aggiornamenti con tag `:latest`.
-* **Smart State Restoration**: Rispetta lo stato dei tuoi servizi. Se un container era spento prima dell'aggiornamento, verrà riportato allo stato *stopped* automaticamente.
-* **Integrazione Home Assistant (HA)**: Modalità `ha` dedicata che silenzia l'output SSH (evitando timeout) e invia una notifica push con il report finale.
-* **Sicurezza Integrata**: 
-    * Snapshot automatico del LXC prima di ogni operazione.
-    * **Rollback automatico** con riavvio del LXC in caso di errore durante il pull o l'avvio.
-    * Report intelligente: se un LXC fallisce, i successi parziali vengono segnalati come annullati nel log.
-* **Auto-Cleanup**: Esegue `docker image prune` alla fine di ogni aggiornamento riuscito per risparmiare spazio.
+* **Interfaccia Grafica (GUI)**: Se avviato senza argomenti, lo script apre un menu interattivo (whiptail) per selezionare i container e le opzioni di aggiornamento.
+* **Supporto Nativo Dockge**: Gestione prioritaria per gli stack gestiti tramite Dockge (rileva automaticamente i percorsi `/opt/dockge`).
+* **Modalità Clean**: Nuova opzione per eliminare TUTTI gli snapshot creati dallo script dopo un aggiornamento riuscito, mantenendo il sistema Proxmox pulito.
+* **Deep Tag Resolution**: Confronta gli ID reali delle immagini per evitare riavvii inutili se l'immagine non è cambiata.
+* **Smart State Restoration**: Mantiene lo stato originale dei servizi (se un container era spento, rimarrà spento dopo l'aggiornamento).
 
 ---
 
-## 🔑 Requisiti per Home Assistant
+## 🚀 Modalità di Esecuzione
 
-Per controllare gli aggiornamenti dall'App di HA, configura Proxmox come segue:
+### 1. Modalità Interattiva (GUI)
+Semplicemente esegui lo script senza parametri:
+```bash
+bash update-lxc.sh
+````
 
-1.  **Accesso SSH senza password**: La chiave pubblica di HA deve essere presente in `/root/.ssh/authorized_keys` su Proxmox.
-2.  **File dei Segreti**: Crea il file `/root/ha_secret.conf` su Proxmox:
-    ```bash
-    HA_URL="[https://tuo-ha.duckdns.org/api/services/notify/mobile_app_tuo_smartphone](https://tuo-ha.duckdns.org/api/services/notify/mobile_app_tuo_smartphone)"
-    HA_TOKEN="Bearer TUO_TOKEN_LONG_LIVED"
-    ```
+Si aprirà un menu dove potrai scegliere quali LXC aggiornare e quali flag attivare (Clean, No-Snap, Dry-Run, HA).
 
----
-
-## 🤖 Configurazione su Home Assistant
-
-### 1. Shell Command
-Aggiungi al tuo `configuration.yaml`:
-```yaml
-shell_command:
-  aggiorna_lxc: 'ssh -i /config/.ssh/id_rsa -o StrictHostKeyChecking=no root@IP_PROXMOX "bash /root/update-lxc.sh {{ lxc_id }} ha"'
-
-```
-
-### 2. Script (Esempio)
-
-Crea uno script nell'interfaccia di HA per richiamare il comando:
-
-```yaml
-alias: Aggiorna Immich
-sequence:
-  - action: shell_command.aggiorna_lxc
-    data:
-      lxc_id: "immich" # Può essere l'ID numerico o il nome del LXC
-
-```
-
----
-
-## 🚀 Esecuzione Diretta (CLI)
-
-Puoi eseguire lo script direttamente dal terminale di Proxmox usando i seguenti comandi:
+### 2\. Modalità CLI (Terminale)
 
 | Comando | Descrizione |
 | --- | --- |
 | `update-lxc.sh all` | Aggiorna tutti i LXC rilevati. |
-| `update-lxc.sh 100` | Aggiorna solo il LXC con ID 100. |
-| `update-lxc.sh all ha` | Aggiorna tutto e invia notifica push a HA. |
-| `update-lxc.sh all --dry-run` | Simula l'operazione senza modificare nulla. |
-| `update-lxc.sh all --no-snap` | Esegue l'aggiornamento senza creare snapshot. |
+| `update-lxc.sh 100 clean` | Aggiorna il LXC 100 e rimuove i suoi snapshot AUTO\_UPDATE. |
+| `update-lxc.sh all ha` | Esegue tutto e invia il report push a Home Assistant. |
+| `update-lxc.sh --dry-run` | Simula l'operazione senza applicare modifiche. |
+| `update-lxc.sh --no-snap` | Aggiorna senza creare snapshot di sicurezza. |
 
-### One-Liner per l'aggiornamento rapido:
+-----
 
-```bash
-bash -c "$(curl -fsSL [https://raw.githubusercontent.com/fcaronte/proxmox_lxc_docker_updater/main/update-lxc.sh](https://raw.githubusercontent.com/fcaronte/proxmox_lxc_docker_updater/main/update-lxc.sh))" -- all ha
+## 🔑 Integrazione Home Assistant
 
-```
+1.  **File Segreti**: Crea `/root/ha_secret.conf`:
+    ```bash
+    HA_URL="[https://tuo-ha.duckdns.org/api/services/notify/mobile_app_tuo_smartphone](https://tuo-ha.duckdns.org/api/services/notify/mobile_app_tuo_smartphone)"
+    HA_TOKEN="Bearer TUO_TOKEN_LONG_LIVED"
+    ```
+2.  **Comando Shell**: In `configuration.yaml`:
+    ```yaml
+    shell_command:
+      aggiorna_lxc: 'ssh -o StrictHostKeyChecking=no root@IP_PROXMOX "bash /root/update-lxc.sh {{ lxc_id }} ha"'
+    ```
 
----
+-----
 
-## 📋 Note Tecniche
+## 📋 Note Tecniche e Sicurezza
 
-Lo script scansiona automaticamente le cartelle configurate in `SCAN_ROOTS` (default: `/root` e `/opt/stacks`) alla ricerca di file `docker-compose.yml` o `compose.yaml`.
+  * **Snapshot**: Lo script crea uno snapshot chiamato `AUTO_UPDATE_SNAP_...`.
+  * **Rollback**: In caso di errore durante il `docker compose up`, lo script esegue automaticamente il rollback allo stato precedente.
+  * **Pruning**: Al termine di ogni successo, viene eseguito `docker image prune -af` per liberare spazio nel LXC.
 
-### Gestione Rollback
-
-Se lo script rileva un errore durante il `docker compose up`, eseguirà immediatamente:
-
-1. `pct rollback` all'istante precedente l'inizio.
-2. `pct start` per assicurare la continuità del servizio.
-3. Notifica HA con prefisso `❌` per gli stack annullati.
-
----
+-----
 
 ## 📝 Licenza
 
-Sviluppato con il supporto di **Gemini AI**.
-Distribuito sotto licenza MIT. Usare con cautela: si consiglia sempre un `--dry-run` prima di aggiornamenti massivi.
+Sviluppato con il supporto di **Gemini AI**. Licenza MIT.
 
+````
+
+---
 
 # 🇬🇧 Proxmox LXC Docker Updater (English)
 
-
 ```markdown
-# 🚀 Proxmox LXC Docker Updater (v1.8.9+)
+# 🚀 Proxmox LXC Docker Updater (v1.9.0+)
 
 [![Bash Script](https://img.shields.io/badge/language-Bash-4EAA25.svg)](https://www.gnu.org/software/bash/)
 [![Proxmox](https://img.shields.io/badge/Platform-Proxmox-E57020.svg)](https://www.proxmox.com)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A professional script for automated updates of **Docker Compose** stacks running inside **Proxmox LXC** containers. It features snapshot management, automatic rollback, and native **Home Assistant** integration.
+Advanced script for automated Docker container updates inside Proxmox LXCs. This version introduces an interactive GUI and intelligent snapshot cleanup management.
 
 ---
 
-## 🌟 Key Features
+## 🌟 Version 1.9.x Highlights
 
-* **Deep Tag Resolution**: Compares the running image ID with the actual on-disk ID after pull. Solves the "fake update" issue with `:latest` tags.
-* **Smart State Restoration**: Respects your service states. If a container was stopped before the update, it will be automatically stopped again after the update is completed.
-* **Home Assistant (HA) Integration**: Dedicated `ha` mode that silences SSH output (preventing timeouts) and sends a push notification with the final report.
-* **Safety First**: 
-    * Automatic LXC snapshot before any operation.
-    * **Automatic Rollback**: Reverts to the previous state and restarts the LXC if an error occurs during pull or startup.
-    * Intelligent Reporting: If an LXC update fails, any partial successes are marked as "Reverted" in the logs.
-* **Auto-Cleanup**: Runs `docker image prune` after every successful update to save disk space.
+* **Interactive GUI**: Launching the script without arguments opens a whiptail menu to select containers and update options.
+* **Dockge Native Support**: Priority management for stacks handled via Dockge (automatically detects `/opt/dockge` paths).
+* **Clean Mode**: New option to delete ALL snapshots created by the script after a successful update, keeping your Proxmox storage tidy.
+* **Deep Tag Resolution**: Compares actual image IDs to prevent unnecessary restarts if the image hasn't changed.
+* **Smart State Restoration**: Respects original service states (stopped containers stay stopped after update).
 
 ---
 
-## 🔑 Home Assistant Prerequisites
+## 🚀 Execution Modes
 
-To trigger updates from the HA App, configure Proxmox as follows:
+### 1. Interactive Mode (GUI)
+Simply run the script with no parameters:
+```bash
+bash update-lxc.sh
+````
 
-1.  **Passwordless SSH Access**: HA's public key must be added to `/root/.ssh/authorized_keys` on your Proxmox host.
-2.  **Secrets File**: Create the file `/root/ha_secret.conf` on Proxmox:
-    ```bash
-    HA_URL="[https://your-ha.duckdns.org/api/services/notify/mobile_app_your_smartphone](https://your-ha.duckdns.org/api/services/notify/mobile_app_your_smartphone)"
-    HA_TOKEN="Bearer YOUR_LONG_LIVED_TOKEN"
-    ```
+A menu will appear allowing you to pick LXCs and toggle flags (Clean, No-Snap, Dry-Run, HA).
 
----
-
-## 🤖 Home Assistant Setup
-
-### 1. Shell Command
-Add this to your `configuration.yaml`:
-```yaml
-shell_command:
-  update_lxc: 'ssh -i /config/.ssh/id_rsa -o StrictHostKeyChecking=no root@PROXMOX_IP "bash /root/update-lxc.sh {{ lxc_id }} ha"'
-
-```
-
-### 2. Script (Example)
-
-Create a script in the HA UI to trigger the command:
-
-```yaml
-alias: Update Immich
-sequence:
-  - action: shell_command.update_lxc
-    data:
-      lxc_id: "immich" # Can be the numerical ID or the LXC hostname
-
-```
-
----
-
-## 🚀 CLI Execution
-
-You can run the script directly from the Proxmox terminal:
+### 2\. CLI Mode (Terminal)
 
 | Command | Description |
 | --- | --- |
 | `update-lxc.sh all` | Updates all detected LXCs. |
-| `update-lxc.sh 100` | Updates only the LXC with ID 100. |
-| `update-lxc.sh all ha` | Updates all and sends a push notification to HA. |
-| `update-lxc.sh all --dry-run` | Simulates the operation without making changes. |
-| `update-lxc.sh all --no-snap` | Runs the update without creating snapshots. |
+| `update-lxc.sh 100 clean` | Updates LXC 100 and removes its AUTO\_UPDATE snapshots. |
+| `update-lxc.sh all ha` | Runs all and sends a push report to Home Assistant. |
+| `update-lxc.sh --dry-run` | Simulates the operation without making changes. |
+| `update-lxc.sh --no-snap` | Runs the update without creating security snapshots. |
 
-### Quick One-Liner:
+-----
 
-```bash
-bash -c "$(curl -fsSL [https://raw.githubusercontent.com/fcaronte/proxmox_lxc_docker_updater/main/update-lxc.sh](https://raw.githubusercontent.com/fcaronte/proxmox_lxc_docker_updater/main/update-lxc.sh))" -- all ha
+## 🔑 Home Assistant Integration
 
-```
+1.  **Secrets File**: Create `/root/ha_secret.conf`:
+    ```bash
+    HA_URL="[https://your-ha.duckdns.org/api/services/notify/mobile_app_your_phone](https://your-ha.duckdns.org/api/services/notify/mobile_app_your_phone)"
+    HA_TOKEN="Bearer YOUR_LONG_LIVED_TOKEN"
+    ```
+2.  **Shell Command**: In `configuration.yaml`:
+    ```yaml
+    shell_command:
+      update_lxc: 'ssh -o StrictHostKeyChecking=no root@PROXMOX_IP "bash /root/update-lxc.sh {{ lxc_id }} ha"'
+    ```
 
----
+-----
 
-## 📋 Technical Notes
+## 📋 Technical Notes & Safety
 
-The script automatically scans paths configured in `SCAN_ROOTS` (default: `/root` and `/opt/stacks`) for `docker-compose.yml` or `compose.yaml` files.
+  * **Snapshots**: The script creates a snapshot named `AUTO_UPDATE_SNAP_...`.
+  * **Rollback**: If an error is detected during `docker compose up`, it automatically performs a rollback to the previous state.
+  * **Pruning**: Runs `docker image prune -af` inside the LXC after every success to reclaim disk space.
 
-### Rollback Management
-
-If the script detects an error during `docker compose up`, it immediately executes:
-
-1. `pct rollback` to the state before the update started.
-2. `pct start` to ensure service continuity.
-3. HA Notification with a `❌` prefix for the reverted stacks.
-
----
+-----
 
 ## 📝 License
 
-Developed with support from **Gemini AI**.
-Distributed under the MIT License. Use with caution: always perform a `--dry-run` before mass updates.
+Developed with **Gemini AI** support. MIT License.
 
+```
 ```
