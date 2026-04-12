@@ -85,7 +85,7 @@ if [ $# -eq 0 ]; then
         VMID_CLEAN=$(echo "$VMID" | xargs)
         [[ -z "$VMID_CLEAN" ]] && continue
         echo -e "\n${C_CYAN}>>> AVVIO LXC: $VMID_CLEAN${C_DEFAULT}"
-        bash "$0" -i "$VMID_CLEAN" $FINAL_OPTS
+        bash $0 -i "$VMID_CLEAN" $FINAL_OPTS || bash update-lxc.sh -i "$VMID_CLEAN" $FINAL_OPTS
     done
     exit 0
 fi
