@@ -1,4 +1,3 @@
-
 -----
 
 # 🌍 Language / Lingua
@@ -11,7 +10,7 @@
 # 🇮🇹 Proxmox LXC Docker Updater (Italiano)
 
 ````markdown
-# 🚀 Proxmox LXC Docker Updater (v1.9.0+)
+# 🚀 Proxmox LXC Docker Updater (v1.9.1)
 
 [![Bash Script](https://img.shields.io/badge/language-Bash-4EAA25.svg)](https://www.gnu.org/software/bash/)
 [![Proxmox](https://img.shields.io/badge/Platform-Proxmox-E57020.svg)](https://www.proxmox.com)
@@ -87,7 +86,7 @@ Sviluppato con il supporto di **Gemini AI**. Licenza MIT.
 # 🇬🇧 Proxmox LXC Docker Updater (English)
 
 ```markdown
-# 🚀 Proxmox LXC Docker Updater (v1.9.0+)
+# 🚀 Proxmox LXC Docker Updater (v1.9.1)
 
 [![Bash Script](https://img.shields.io/badge/language-Bash-4EAA25.svg)](https://www.gnu.org/software/bash/)
 [![Proxmox](https://img.shields.io/badge/Platform-Proxmox-E57020.svg)](https://www.proxmox.com)
