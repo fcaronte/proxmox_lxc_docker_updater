@@ -2,8 +2,24 @@
 
 # ======================================================================
 # SCRIPT: update-lxc.sh
-# VERSIONE: 1.9.0 (Hybrid GUI + Improved CLI)
+# VERSIONE: 1.9.1 (Adaptive Layout)
 # ======================================================================
+
+# Rileva le dimensioni del terminale
+TERM_WIDTH=$(tput cols)
+TERM_HEIGHT=$(tput lines)
+
+# Calcola una larghezza sicura (80% dello schermo, max 70, min 40)
+IFACE_WIDTH=$(( TERM_WIDTH * 80 / 100 ))
+if [ $IFACE_WIDTH -gt 70 ]; then IFACE_WIDTH=70; fi
+if [ $IFACE_WIDTH -lt 40 ]; then IFACE_WIDTH=40; fi
+
+# Calcola un'altezza sicura (80% dello schermo)
+IFACE_HEIGHT=$(( TERM_HEIGHT * 80 / 100 ))
+if [ $IFACE_HEIGHT -lt 15 ]; then IFACE_HEIGHT=15; fi
+
+# Calcola l'altezza della lista interna (altezza finestra - 10 righe di bordi/testo)
+LIST_HEIGHT=$(( IFACE_HEIGHT - 10 ))
 
 echo $$ > /var/run/update-lxc.pid
 trap "echo -ne '\033[0m'; rm -f /var/run/update-lxc.pid" EXIT
@@ -55,11 +71,18 @@ if [ $# -eq 0 ]; then
     fi
 
     LXC_RAW=$(pct list | awk 'NR>1 {print $1 " [" $3 "] off"}')
-    LXC_MENU="ALL [Tutti_i_container] off $LXC_RAW"
+    LXC_MENU="ALL [Tutti] off $LXC_RAW"
 
     CHOICES=$(whiptail --title "Proxmox LXC Updater v$SCRIPT_VERSION" \
-        --checklist "Seleziona i container (Spazio per selezionare):" 20 75 10 \
+        --checklist "Seleziona i container (Spazio per selezionare):" \
+        $IFACE_HEIGHT $IFACE_WIDTH $LIST_HEIGHT \
         $LXC_MENU 3>&1 1>&2 2>&3)
+
+    exit_status=$?
+    if [ $exit_status -ne 0 ]; then
+        echo -e "\n${C_YELLOW}Operazione annullata.${C_DEFAULT}"
+        exit 0
+    fi    
 
     [ -z "$CHOICES" ] && exit 0
     CHOICES=$(echo "$CHOICES" | tr -d '"')
@@ -69,11 +92,17 @@ if [ $# -eq 0 ]; then
     fi
 
     OPTIONS=$(whiptail --title "Opzioni di Aggiornamento" \
-        --checklist "Seleziona le flag desiderate:" 15 60 5 \
+        --checklist "Seleziona le flag desiderate:" \
+        $IFACE_HEIGHT $IFACE_WIDTH 5 \
         "clean" "Esegui pulizia snapshot [-c]" OFF \
         "nosnap" "Salta snapshot [-s]" OFF \
         "dryrun" "Simulazione (Dry Run) [-n]" OFF \
         "ha" "Modalità Home Assistant [-ha]" OFF 3>&1 1>&2 2>&3)
+
+    if [ $? -ne 0 ]; then
+        echo -e "\n${C_YELLOW}Operazione annullata.${C_DEFAULT}"
+        exit 0
+    fi
 
     FINAL_OPTS=""
     [[ "$OPTIONS" == *"clean"* ]] && FINAL_OPTS="$FINAL_OPTS clean"
