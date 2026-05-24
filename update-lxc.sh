@@ -2,7 +2,7 @@
 
 # ======================================================================
 # SCRIPT: update-lxc.sh
-# VERSIONE: 1.9.1 (Adaptive Layout)
+# VERSIONE: 1.9.2 (Aggiunta funzione BACKGROUND integrata)
 # ======================================================================
 
 # Rileva le dimensioni del terminale
@@ -14,7 +14,7 @@ IFACE_WIDTH=$(( TERM_WIDTH * 80 / 100 ))
 if [ $IFACE_WIDTH -gt 70 ]; then IFACE_WIDTH=70; fi
 if [ $IFACE_WIDTH -lt 40 ]; then IFACE_WIDTH=40; fi
 
-# Calcola un'altezza sicura (80% dello schermo)
+# Calcola un'altezza safe (80% dello schermo)
 IFACE_HEIGHT=$(( TERM_HEIGHT * 80 / 100 ))
 if [ $IFACE_HEIGHT -lt 15 ]; then IFACE_HEIGHT=15; fi
 
@@ -28,10 +28,12 @@ trap "echo -ne '\033[0m'; rm -f /var/run/update-lxc.pid" EXIT
 SCAN_ROOTS="/root /opt/stacks"
 DOCKGE_PATHS="/root/dockge_install/dockge /opt/dockge" 
 KEEP_LAST_SNAPSHOT=true 
+LOG_FILE="/root/script.tmp"
+SCRIPT_FISICO="/tmp/script.sh"
 # -------------------
 
 # --- CONFIGURAZIONE VARIABILI INTERNE ---
-SCRIPT_VERSION="1.9.0"
+SCRIPT_VERSION="1.9.2"
 SNAP_PREFIX="AUTO_UPDATE_SNAP"
 HOST_IP=$(hostname -I | awk '{print $1}')
 
@@ -53,11 +55,11 @@ show_help() {
     echo -e "${C_CYAN}Utilizzo:${C_DEFAULT} $0 <ID_LXC|all> [opzioni]"
     echo ""
     echo -e "${C_YELLOW}Opzioni CLI:${C_DEFAULT}"
-    echo "  -i <ID>       ID del container (usato dalla GUI)"
-    echo "  --dry-run     Simulazione senza modifiche"
-    echo "  --no-snap     Salta la creazione degli snapshot"
-    echo "  clean         Esegui pulizia snapshot"
-    echo "  ha            Notifiche Home Assistant"
+    echo "  -i <ID>        ID del container (usato dalla GUI)"
+    echo "  --dry-run      Simulazione senza modifiche"
+    echo "  --no-snap      Salta la creazione degli snapshot"
+    echo "  clean          Esegui pulizia snapshot"
+    echo "  ha             Notifiche Home Assistant"
     echo ""
     echo "Info: Avvia senza argomenti per l'interfaccia grafica."
     exit 0
@@ -71,7 +73,8 @@ if [ $# -eq 0 ]; then
     fi
 
     LXC_RAW=$(pct list | awk 'NR>1 {print $1 " [" $3 "] off"}')
-    LXC_MENU="ALL [Tutti] off $LXC_RAW"
+    # Aggiunta opzione BACKGROUND nel menu iniziale
+    LXC_MENU="BACKGROUND [Esegui_in_background] off ALL [Tutti] off $LXC_RAW"
 
     CHOICES=$(whiptail --title "Proxmox LXC Updater v$SCRIPT_VERSION" \
         --checklist "Seleziona i container (Spazio per selezionare):" \
@@ -86,6 +89,15 @@ if [ $# -eq 0 ]; then
 
     [ -z "$CHOICES" ] && exit 0
     CHOICES=$(echo "$CHOICES" | tr -d '"')
+
+    # Rilevamento flag BACKGROUND
+    IS_PERSISTENT=false
+    if [[ " $CHOICES " == *" BACKGROUND "* ]]; then
+        # Attiviamo lo stato e ripuliamo la stringa dei container
+        # in modo che rimangano solo gli ID reali o "all"
+        IS_PERSISTENT=true
+        CHOICES=$(echo "$CHOICES" | sed 's/BACKGROUND//g')
+    fi
 
     if [[ " $CHOICES " == *" ALL "* ]]; then
         CHOICES="all"
@@ -110,26 +122,53 @@ if [ $# -eq 0 ]; then
     [[ "$OPTIONS" == *"dryrun"* ]] && FINAL_OPTS="$FINAL_OPTS --dry-run"
     [[ "$OPTIONS" == *"ha"* ]] && FINAL_OPTS="$FINAL_OPTS ha"
 
+    # --- STRATEGIA DI BACKUP / GESTIONE BACKGROUND ---
+    if [ "$IS_PERSISTENT" = true ]; then
+        > "$LOG_FILE"
+        echo -e "🚀 Aggiornamento Docker LXC avviato in background totale alle $(date)\n" >> "$LOG_FILE"
+        
+        # Risolviamo la lista dei container nel caso sia stato selezionato "all"
+        LXC_LIST=$([[ " $CHOICES " == *"all"* ]] && pct list | grep running | awk '{print $1}' || echo $CHOICES)
+        
+        for VMID in $LXC_LIST; do
+            VMID_CLEAN=$(echo "$VMID" | xargs)
+            [[ -z "$VMID_CLEAN" ]] && continue
+            echo -e "📦 Accodamento task per LXC $VMID_CLEAN in background..." >> "$LOG_FILE"
+            
+            # Richiama in modo asincrono sequenziale l'istanza CLI di /tmp/script.sh
+            # preservando l'esatta esecuzione originaria, inclusa la chiamata HA
+            nohup bash "$SCRIPT_FISICO" -i "$VMID_CLEAN" $FINAL_OPTS >> "$LOG_FILE" 2>&1
+        done
+        
+        echo -e "${C_GREEN}🚀 Processo inviato in background con successo!${C_DEFAULT}"
+        echo -e "⚠️  L'aggiornamento CONTINUERÀ anche in caso di disconnessione Tailscale o SSH."
+        echo -e "--------------------------------------------------------"
+        echo -e "📋 Apertura log in corso... (Premi Ctrl+C per uscire senza fermare l'esecuzione)\n"
+        sleep 1
+        tail -f "$LOG_FILE"
+        exit 0
+    fi
+
+    # Esecuzione standard in primo piano (se BACKGROUND non è selezionato)
     for VMID in $CHOICES; do
         VMID_CLEAN=$(echo "$VMID" | xargs)
         [[ -z "$VMID_CLEAN" ]] && continue
         echo -e "\n${C_CYAN}>>> AVVIO LXC: $VMID_CLEAN${C_DEFAULT}"
-        bash "$0" -i "$VMID_CLEAN" $FINAL_OPTS 2>/dev/null || bash update-lxc.sh -i "$VMID_CLEAN" $FINAL_OPTS
+        bash "$0" -i "$VMID_CLEAN" $FINAL_OPTS 2>/dev/null || bash "$SCRIPT_FISICO" -i "$VMID_CLEAN" $FINAL_OPTS
     done
     exit 0
 fi
 
 # --- GESTIONE ARGOMENTI (CLI) ---
-# Unificato per gestire sia il vecchio metodo che i flag della GUI
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        -i)                 ARGS+=("$2"); shift 2 ;; # Da GUI
+        -i)                 ARGS+=("$2"); shift 2 ;; 
         --dry-run)          DRY_RUN=true; shift ;;
         --no-snap)          SKIP_SNAPSHOT=true; shift ;;
         clean|--clean)      CLEAN_MODE=true; shift ;;
         ha|--ha)            HA_MODE=true; shift ;;
         -h|--help)          show_help ;;
-        *)                  ARGS+=("$1"); shift ;; # ID o "all"
+        *)                  ARGS+=("$1"); shift ;; 
     esac
 done
 
@@ -167,7 +206,6 @@ trova_lxc_ids() {
         if [ "$TERM" == "all" ]; then FILTERED_IDS+=($ACTIVE_IDS); break; fi
         for ID in $ACTIVE_IDS; do
             if [ "$ID" == "$TERM" ]; then FILTERED_IDS+=("$ID"); continue; fi
-            # Protezione grep: esegui solo se l'ID esiste
             local HOSTNAME=$(pct config "$ID" 2>/dev/null | grep 'hostname' | awk '{print $2}' || true)
             if echo "$HOSTNAME" | grep -qi "$TERM"; then FILTERED_IDS+=("$ID"); fi
         done
