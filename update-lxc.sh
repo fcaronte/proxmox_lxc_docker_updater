@@ -2,10 +2,10 @@
 
 # ======================================================================
 # SCRIPT: update-lxc.sh
-# VERSIONE: 1.9.2 (Aggiunta funzione BACKGROUND integrata)
+# VERSIONE: 1.9.3 (Fix Background Asincrono Anti-Disconnessione VPN)
 # ======================================================================
 
-# Rileva le dimensioni del terminale
+# Rileva le dimensions del terminale
 TERM_WIDTH=$(tput cols)
 TERM_HEIGHT=$(tput lines)
 
@@ -33,7 +33,7 @@ SCRIPT_FISICO="/tmp/script.sh"
 # -------------------
 
 # --- CONFIGURAZIONE VARIABILI INTERNE ---
-SCRIPT_VERSION="1.9.2"
+SCRIPT_VERSION="1.9.3"
 SNAP_PREFIX="AUTO_UPDATE_SNAP"
 HOST_IP=$(hostname -I | awk '{print $1}')
 
@@ -73,7 +73,6 @@ if [ $# -eq 0 ]; then
     fi
 
     LXC_RAW=$(pct list | awk 'NR>1 {print $1 " [" $3 "] off"}')
-    # Aggiunta opzione BACKGROUND nel menu iniziale
     LXC_MENU="BACKGROUND [Esegui_in_background] off ALL [Tutti] off $LXC_RAW"
 
     CHOICES=$(whiptail --title "Proxmox LXC Updater v$SCRIPT_VERSION" \
@@ -93,8 +92,6 @@ if [ $# -eq 0 ]; then
     # Rilevamento flag BACKGROUND
     IS_PERSISTENT=false
     if [[ " $CHOICES " == *" BACKGROUND "* ]]; then
-        # Attiviamo lo stato e ripuliamo la stringa dei container
-        # in modo che rimangano solo gli ID reali o "all"
         IS_PERSISTENT=true
         CHOICES=$(echo "$CHOICES" | sed 's/BACKGROUND//g')
     fi
@@ -122,23 +119,25 @@ if [ $# -eq 0 ]; then
     [[ "$OPTIONS" == *"dryrun"* ]] && FINAL_OPTS="$FINAL_OPTS --dry-run"
     [[ "$OPTIONS" == *"ha"* ]] && FINAL_OPTS="$FINAL_OPTS ha"
 
-    # --- STRATEGIA DI BACKUP / GESTIONE BACKGROUND ---
-    if [ "$IS_PERSISTENT" = true ]; then
+    # --- STRATEGIA DI BACKUP / GESTIONE BACKGROUND ASINCRONO ---
+    if [ "$Keep_Last_Snapshot" = true ] && [ "$IS_PERSISTENT" = true ]; then
         > "$LOG_FILE"
         echo -e "🚀 Aggiornamento Docker LXC avviato in background totale alle $(date)\n" >> "$LOG_FILE"
         
         # Risolviamo la lista dei container nel caso sia stato selezionato "all"
         LXC_LIST=$([[ " $CHOICES " == *"all"* ]] && pct list | grep running | awk '{print $1}' || echo $CHOICES)
         
-        for VMID in $LXC_LIST; do
-            VMID_CLEAN=$(echo "$VMID" | xargs)
-            [[ -z "$VMID_CLEAN" ]] && continue
-            echo -e "📦 Accodamento task per LXC $VMID_CLEAN in background..." >> "$LOG_FILE"
-            
-            # Richiama in modo asincrono sequenziale l'istanza CLI di /tmp/script.sh
-            # preservando l'esatta esecuzione originaria, inclusa la chiamata HA
-            nohup bash "$SCRIPT_FISICO" -i "$VMID_CLEAN" $FINAL_OPTS >> "$LOG_FILE" 2>&1
-        done
+        # INTERO CICLO IN SUB-SHELL DEMONIZZATO (&) E PROTETTO (nohup)
+        (
+            for VMID in $LXC_LIST; do
+                VMID_CLEAN=$(echo "$VMID" | xargs)
+                [[ -z "$VMID_CLEAN" ]] && continue
+                echo -e "📦 Avvio task per LXC $VMID_CLEAN..." >> "$LOG_FILE"
+                
+                # Il nohup interno garantisce l'immunità totale ai SIGHUP di rete
+                nohup bash "$SCRIPT_FISICO" -i "$VMID_CLEAN" $FINAL_OPTS >> "$LOG_FILE" 2>&1
+            done
+        ) &
         
         echo -e "${C_GREEN}🚀 Processo inviato in background con successo!${C_DEFAULT}"
         echo -e "⚠️  L'aggiornamento CONTINUERÀ anche in caso di disconnessione Tailscale o SSH."
