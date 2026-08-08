@@ -120,34 +120,34 @@ if [ $# -eq 0 ]; then
     [[ "$OPTIONS" == *"ha"* ]] && FINAL_OPTS="$FINAL_OPTS ha"
 
     # --- STRATEGIA DI BACKUP / GESTIONE BACKGROUND ASINCRONO ---
-    if [ "$Keep_Last_Snapshot" = true ] && [ "$IS_PERSISTENT" = true ]; then
+    if [ "$KEEP_LAST_SNAPSHOT" = true ] && [ "$IS_PERSISTENT" = true ]; then
         > "$LOG_FILE"
         echo -e "🚀 Aggiornamento Docker LXC avviato in background totale alle $(date)\n" >> "$LOG_FILE"
         
         # Risolviamo la lista dei container nel caso sia stato selezionato "all"
         LXC_LIST=$([[ " $CHOICES " == *"all"* ]] && pct list | grep running | awk '{print $1}' || echo $CHOICES)
         
-        # INTERO CICLO IN SUB-SHELL DEMONIZZATO (&) E PROTETTO (nohup)
+        # SUB-SHELL COMPLETAMENTE SCOLLEGATA DAL TERMINALE (Anti-SIGHUP / Anti-Tailscale drop)
         (
             for VMID in $LXC_LIST; do
                 VMID_CLEAN=$(echo "$VMID" | xargs)
                 [[ -z "$VMID_CLEAN" ]] && continue
                 echo -e "📦 Avvio task per LXC $VMID_CLEAN..." >> "$LOG_FILE"
                 
-                # Il nohup interno garantisce l'immunità totale ai SIGHUP di rete
+                # Esecuzione isolata con nohup
                 nohup bash "$SCRIPT_FISICO" -i "$VMID_CLEAN" $FINAL_OPTS >> "$LOG_FILE" 2>&1
             done
-        ) &
+        ) </dev/null >/dev/null 2>&1 &
         
         echo -e "${C_GREEN}🚀 Processo inviato in background con successo!${C_DEFAULT}"
         echo -e "⚠️  L'aggiornamento CONTINUERÀ anche in caso di disconnessione Tailscale o SSH."
         echo -e "--------------------------------------------------------"
-        echo -e "📋 Apertura log in corso... (Premi Ctrl+C per uscire senza fermare l'esecuzione)\n"
+        echo -e "📋 Apertura log in corso... (Premi Ctrl+C per uscire dal log senza fermare l'esecuzione)\n"
         sleep 1
         tail -f "$LOG_FILE"
         exit 0
     fi
-
+    
     # Esecuzione standard in primo piano (se BACKGROUND non è selezionato)
     for VMID in $CHOICES; do
         VMID_CLEAN=$(echo "$VMID" | xargs)
