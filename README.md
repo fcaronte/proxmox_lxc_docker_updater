@@ -88,7 +88,6 @@ shell_command:
 
 Sviluppato con il supporto di **Gemini AI**. Licenza MIT.
 
-```
 
 ---
 
