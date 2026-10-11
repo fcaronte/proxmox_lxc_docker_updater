@@ -1,9 +1,8 @@
 ---
+🌍 Language / Lingua
 
-# 🌍 Language / Lingua
-
-* [🇮🇹 Leggi in Italiano](https://www.google.com/search?q=%23-proxmox-lxc-docker-updater-italiano)
-* [🇬🇧 Read in English](https://www.google.com/search?q=%23-proxmox-lxc-docker-updater-english)
+- [🇮🇹 Leggi in Italiano](#-proxmox-lxc-docker-updater-italiano)
+- [🇬🇧 Read in English](#-proxmox-lxc-docker-updater-english)
 
 ---
 
