@@ -30,7 +30,7 @@ DOCKGE_PATHS="/root/dockge_install/dockge /opt/dockge"
 KEEP_LAST_SNAPSHOT=true
 LOG_FILE="/root/script.tmp"
 SCRIPT_FISICO="/tmp/script.sh"
-CRITICAL_STACKS="tailscale termix wireguard nginx proxy npmplus"   # nomi (anche parziali) degli stack da aggiornare per ultimi
+CRITICAL_STACKS="tailscale termix wireguard nginx proxy npmplus "   # nomi (anche parziali) degli stack da aggiornare per ultimi
 CRITICAL_WAIT_TRIES=9                # tentativi di verifica ripartenza (10s ciascuno)
 # -------------------
 
@@ -268,7 +268,8 @@ aggiorna_stack() {
     log_status "      Check $NOME_STACK..."
 
     local RUNNING_BEFORE=$(esegui_remoto "$ID" "cd \"$PATH_STACK\" && docker compose ps --format '{{.Service}}' --filter \"status=running\" 2>/dev/null" | xargs)
-    local PRE_IDS=$(esegui_remoto "$ID" "cd \"$PATH_STACK\" && docker compose ps -a -q | xargs -r docker inspect --format='{{.Image}}' 2>/dev/null | sed 's/sha256://g' | sort -u | xargs")
+    # PRE calcolato con lo stesso metodo di POST (immagini configurate nel compose), così il confronto vede solo ciò che cambia con il pull
+    local PRE_IDS=$(esegui_remoto "$ID" "cd \"$PATH_STACK\" && docker compose config --images 2>/dev/null | xargs -r docker inspect --format='{{.Id}}' 2>/dev/null | sed 's/sha256://g' | sort -u | xargs")
 
     if ! esegui_remoto "$ID" "cd \"$PATH_STACK\" && docker compose pull -q"; then
         log_status "${C_RED}      ✖ Errore Pull su $NOME_STACK${C_DEFAULT}"; return 1
@@ -327,7 +328,12 @@ aggiorna_stack() {
                 fi
             done
             local UPDATED_NAMES=$(echo "$UP_OUT" | grep -E 'Recreated|Started|Created' | sed -E 's/.*Container //;s/ .*//' | sort -u | paste -sd ", " -)
-            UPDATE_LOGS+=("✅ LXC $ID - $NOME_STACK: ${UPDATED_NAMES:-Aggiornato}")
+            if [ -n "$UPDATED_NAMES" ]; then
+                UPDATE_LOGS+=("✅ LXC $ID - $NOME_STACK: $UPDATED_NAMES")
+            else
+                # up -d non ha ricreato nulla: falso positivo del confronto immagini
+                UPDATE_LOGS+=("🟡 LXC $ID - $NOME_STACK: Nessuna modifica (nessun container ricreato).")
+            fi
             return 0
         else
             return 1
