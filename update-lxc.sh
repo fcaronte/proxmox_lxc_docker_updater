@@ -30,7 +30,7 @@ DOCKGE_PATHS="/root/dockge_install/dockge /opt/dockge"
 KEEP_LAST_SNAPSHOT=true
 LOG_FILE="/root/script.tmp"
 SCRIPT_FISICO="/tmp/script.sh"
-CRITICAL_STACKS="tailscale termix wireguard nginx proxy npmplus "   # nomi (anche parziali) degli stack da aggiornare per ultimi
+CRITICAL_STACKS="tailscale termix wireguard nginx proxy npmplus"   # nomi (anche parziali) degli stack da aggiornare per ultimi
 CRITICAL_WAIT_TRIES=9                # tentativi di verifica ripartenza (10s ciascuno)
 # -------------------
 
@@ -281,43 +281,58 @@ aggiorna_stack() {
         log_status "${C_GREEN}      ✔ Aggiornamento trovato per $NOME_STACK!${C_DEFAULT}"
         if [ "$DRY_RUN" = true ]; then UPDATE_LOGS+=("✅ LXC $ID - $NOME_STACK: Disponibile (Dry Run)"); return 0; fi
 
-        local UP_OUT UP_RC
+        local UP_OUT UP_RC IDS_BEFORE IDS_AFTER
+        # ID dei container prima di up -d: se cambiano, il container è stato davvero ricreato
+        IDS_BEFORE=$(esegui_remoto "$ID" "cd \"$PATH_STACK\" && docker compose ps -a -q | sort | xargs")
+
         if is_critical "$NOME_STACK"; then
             log_status "${C_YELLOW}      ⚠ Stack critico: avvio staccato dalla sessione${C_DEFAULT}"
-            # Esecuzione detached: sopravvive anche se la VPN cade durante la ricreazione
-            esegui_remoto "$ID" "cd \"$PATH_STACK\" && (setsid nohup sh -c 'docker compose up -d; sleep 5; docker compose up -d' >/tmp/critical_up.log 2>&1 </dev/null &)"
+
+            # Lo script staccato gira sull'HOST (non dentro l'LXC): sopravvive al drop della VPN
+            # e il log resta leggibile sull'host
+            local HLOG="/root/critical_up_${ID}_${NOME_STACK}.log"
+            local HSCRIPT
+            HSCRIPT=$(mktemp /tmp/critical_up.XXXXXX)
+            cat > "$HSCRIPT" <<EOF
+#!/bin/bash
+pct exec $ID -- bash -c 'export LC_ALL=C.UTF-8; cd "$PATH_STACK" && docker compose up -d 2>&1; sleep 5; docker compose up -d 2>&1'
+echo __DONE__
+EOF
+            : > "$HLOG"
+            setsid nohup bash "$HSCRIPT" >"$HLOG" 2>&1 </dev/null &
 
             # Quanti servizi dovevano essere attivi (minimo 1)
             local EXPECTED=$(echo "$RUNNING_BEFORE" | wc -w)
             [ "${EXPECTED:-0}" -lt 1 ] && EXPECTED=1
 
-            # Attende la ripartenza con polling
-            local CHK=0 TRY
-            UP_RC=1
+            # 1) Attende la fine di up -d (marker nel log)
+            local TRY
             for TRY in $(seq 1 "$CRITICAL_WAIT_TRIES"); do
                 sleep 10
-                CHK=$(esegui_remoto "$ID" "cd \"$PATH_STACK\" && docker compose ps --status running -q | wc -l")
-                if [ "${CHK:-0}" -ge "$EXPECTED" ]; then UP_RC=0; break; fi
+                grep -q "__DONE__" "$HLOG" 2>/dev/null && break
             done
 
-            UP_OUT=$(esegui_remoto "$ID" "cat /tmp/critical_up.log")
-
-            if [ $UP_RC -ne 0 ]; then
-                # Ultimo tentativo di ripartenza
-                log_status "${C_YELLOW}      ↻ Ritento avvio di $NOME_STACK...${C_DEFAULT}"
-                esegui_remoto "$ID" "cd \"$PATH_STACK\" && docker compose up -d" >/dev/null 2>&1
-                sleep 10
+            # 2) Verifica che i servizi siano ripartiti
+            local CHK=0
+            UP_RC=1
+            for TRY in 1 2 3 4 5 6; do
                 CHK=$(esegui_remoto "$ID" "cd \"$PATH_STACK\" && docker compose ps --status running -q | wc -l")
-                [ "${CHK:-0}" -ge "$EXPECTED" ] && UP_RC=0
-            fi
+                if [ "${CHK:-0}" -ge "$EXPECTED" ]; then UP_RC=0; break; fi
+                sleep 10
+            done
+
+            UP_OUT=$(cat "$HLOG" 2>/dev/null)
+            rm -f "$HSCRIPT"
 
             if [ $UP_RC -ne 0 ]; then
-                log_status "${C_RED}      ✖ $NOME_STACK non ripartito${C_DEFAULT}"
+                log_status "${C_RED}      ✖ $NOME_STACK non ripartito (log: $HLOG)${C_DEFAULT}"
             fi
         else
             UP_OUT=$(esegui_remoto "$ID" "cd \"$PATH_STACK\" && docker compose up -d 2>&1")
             UP_RC=$?
         fi
+
+        IDS_AFTER=$(esegui_remoto "$ID" "cd \"$PATH_STACK\" && docker compose ps -a -q | sort | xargs")
 
         if [ $UP_RC -eq 0 ]; then
             # Ferma i servizi che erano spenti prima dell'aggiornamento
@@ -328,6 +343,10 @@ aggiorna_stack() {
                 fi
             done
             local UPDATED_NAMES=$(echo "$UP_OUT" | grep -E 'Recreated|Started|Created' | sed -E 's/.*Container //;s/ .*//' | sort -u | paste -sd ", " -)
+            # Se gli ID dei container sono cambiati, è stato ricreato anche se il testo non lo dice
+            if [ -z "$UPDATED_NAMES" ] && [ -n "$IDS_AFTER" ] && [ "$IDS_AFTER" != "$IDS_BEFORE" ]; then
+                UPDATED_NAMES="container ricreati"
+            fi
             if [ -n "$UPDATED_NAMES" ]; then
                 UPDATE_LOGS+=("✅ LXC $ID - $NOME_STACK: $UPDATED_NAMES")
             else
