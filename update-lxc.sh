@@ -2,12 +2,12 @@
 
 # ======================================================================
 # SCRIPT: update-lxc.sh
-# VERSIONE: 1.9.3 (Fix Background Asincrono Anti-Disconnessione VPN)
+# VERSIONE: 2.1.0 (LXC con stack critici sempre per ultimi + wireguard)
 # ======================================================================
 
-# Rileva le dimensions del terminale
-TERM_WIDTH=$(tput cols)
-TERM_HEIGHT=$(tput lines)
+# Rileva le dimensioni del terminale
+TERM_WIDTH=$(tput cols 2>/dev/null || echo 80)
+TERM_HEIGHT=$(tput lines 2>/dev/null || echo 24)
 
 # Calcola una larghezza sicura (80% dello schermo, max 70, min 40)
 IFACE_WIDTH=$(( TERM_WIDTH * 80 / 100 ))
@@ -18,7 +18,7 @@ if [ $IFACE_WIDTH -lt 40 ]; then IFACE_WIDTH=40; fi
 IFACE_HEIGHT=$(( TERM_HEIGHT * 80 / 100 ))
 if [ $IFACE_HEIGHT -lt 15 ]; then IFACE_HEIGHT=15; fi
 
-# Calcola l'altezza della lista interna (altezza finestra - 10 righe di bordi/testo)
+# Altezza della lista interna (altezza finestra - 10 righe di bordi/testo)
 LIST_HEIGHT=$(( IFACE_HEIGHT - 10 ))
 
 echo $$ > /var/run/update-lxc.pid
@@ -26,22 +26,29 @@ trap "echo -ne '\033[0m'; rm -f /var/run/update-lxc.pid" EXIT
 
 # --- USER CONFIG ---
 SCAN_ROOTS="/root /opt/stacks"
-DOCKGE_PATHS="/root/dockge_install/dockge /opt/dockge" 
-KEEP_LAST_SNAPSHOT=true 
+DOCKGE_PATHS="/root/dockge_install/dockge /opt/dockge"
+KEEP_LAST_SNAPSHOT=true
 LOG_FILE="/root/script.tmp"
 SCRIPT_FISICO="/tmp/script.sh"
+CRITICAL_STACKS="tailscale termix wireguard nginx proxy npmplus"   # nomi (anche parziali) degli stack da aggiornare per ultimi
+CRITICAL_WAIT_TRIES=9                # tentativi di verifica ripartenza (10s ciascuno)
 # -------------------
 
 # --- CONFIGURAZIONE VARIABILI INTERNE ---
-SCRIPT_VERSION="1.9.3"
+SCRIPT_VERSION="2.1.0"
 SNAP_PREFIX="AUTO_UPDATE_SNAP"
 HOST_IP=$(hostname -I | awk '{print $1}')
 
+# Se SCRIPT_FISICO non esiste, usa il percorso di questo script
+if [ ! -f "$SCRIPT_FISICO" ]; then
+    SCRIPT_FISICO="$(readlink -f "$0")"
+fi
+
 C_DEFAULT='\033[0m'
-C_RED='\033[0;31m'    
-C_GREEN='\033[0;32m'  
-C_YELLOW='\033[1;33m' 
-C_CYAN='\033[0;36m'   
+C_RED='\033[0;31m'
+C_GREEN='\033[0;32m'
+C_YELLOW='\033[1;33m'
+C_CYAN='\033[0;36m'
 
 declare -a UPDATE_LOGS
 DRY_RUN=false
@@ -84,7 +91,7 @@ if [ $# -eq 0 ]; then
     if [ $exit_status -ne 0 ]; then
         echo -e "\n${C_YELLOW}Operazione annullata.${C_DEFAULT}"
         exit 0
-    fi    
+    fi
 
     [ -z "$CHOICES" ] && exit 0
     CHOICES=$(echo "$CHOICES" | tr -d '"')
@@ -119,62 +126,59 @@ if [ $# -eq 0 ]; then
     [[ "$OPTIONS" == *"dryrun"* ]] && FINAL_OPTS="$FINAL_OPTS --dry-run"
     [[ "$OPTIONS" == *"ha"* ]] && FINAL_OPTS="$FINAL_OPTS ha"
 
-    # --- STRATEGIA DI BACKUP / GESTIONE BACKGROUND ASINCRONO ---
-    if [ "$KEEP_LAST_SNAPSHOT" = true ] && [ "$IS_PERSISTENT" = true ]; then
+    # Costruisce gli argomenti ID: una SOLA esecuzione con tutti i container,
+    # così l'ordinamento (critici per ultimi) vale su tutta la lista
+    if [[ " $CHOICES " == *"all"* ]]; then
+        IDS_ARGS="all"
+    else
+        IDS_ARGS=""
+        for VMID in $CHOICES; do IDS_ARGS="$IDS_ARGS -i $VMID"; done
+    fi
+
+    # --- GESTIONE BACKGROUND ASINCRONO ---
+    if [ "$IS_PERSISTENT" = true ]; then
         > "$LOG_FILE"
-        echo -e "🚀 Aggiornamento Docker LXC avviato in background totale alle $(date)\n" >> "$LOG_FILE"
-        
-        # Risolviamo la lista dei container nel caso sia stato selezionato "all"
-        LXC_LIST=$([[ " $CHOICES " == *"all"* ]] && pct list | grep running | awk '{print $1}' || echo $CHOICES)
-        
-        # SUB-SHELL COMPLETAMENTE SCOLLEGATA DAL TERMINALE (Anti-SIGHUP / Anti-Tailscale drop)
-        (
-            for VMID in $LXC_LIST; do
-                VMID_CLEAN=$(echo "$VMID" | xargs)
-                [[ -z "$VMID_CLEAN" ]] && continue
-                echo -e "📦 Avvio task per LXC $VMID_CLEAN..." >> "$LOG_FILE"
-                
-                # Esecuzione isolata con nohup
-                nohup bash "$SCRIPT_FISICO" -i "$VMID_CLEAN" $FINAL_OPTS >> "$LOG_FILE" 2>&1
-            done
-        ) </dev/null >/dev/null 2>&1 &
-        
+        echo -e "🚀 Aggiornamento Docker LXC avviato in background alle $(date)\n" >> "$LOG_FILE"
+
+        # Sessione completamente scollegata dal terminale (anti-SIGHUP / anti-drop Tailscale)
+        setsid bash -c '
+            LOG="$1"; SCRIPT="$2"; shift 2
+            bash "$SCRIPT" "$@" >> "$LOG" 2>&1
+            echo -e "\n🏁 Tutti i task completati alle $(date)" >> "$LOG"
+        ' _ "$LOG_FILE" "$SCRIPT_FISICO" $IDS_ARGS $FINAL_OPTS </dev/null >/dev/null 2>&1 &
+        disown
+
         echo -e "${C_GREEN}🚀 Processo inviato in background con successo!${C_DEFAULT}"
         echo -e "⚠️  L'aggiornamento CONTINUERÀ anche in caso di disconnessione Tailscale o SSH."
         echo -e "--------------------------------------------------------"
-        echo -e "📋 Apertura log in corso... (Premi Ctrl+C per uscire dal log senza fermare l'esecuzione)\n"
+        echo -e "📋 Apertura log... (Ctrl+C per uscire dal log senza fermare l'esecuzione)\n"
         sleep 1
         tail -f "$LOG_FILE"
         exit 0
     fi
-    
-    # Esecuzione standard in primo piano (se BACKGROUND non è selezionato)
-    for VMID in $CHOICES; do
-        VMID_CLEAN=$(echo "$VMID" | xargs)
-        [[ -z "$VMID_CLEAN" ]] && continue
-        echo -e "\n${C_CYAN}>>> AVVIO LXC: $VMID_CLEAN${C_DEFAULT}"
-        bash "$0" -i "$VMID_CLEAN" $FINAL_OPTS 2>/dev/null || bash "$SCRIPT_FISICO" -i "$VMID_CLEAN" $FINAL_OPTS
-    done
+
+    # Esecuzione standard in primo piano (unica esecuzione, ordine gestito dallo script)
+    bash "$SCRIPT_FISICO" $IDS_ARGS $FINAL_OPTS
     exit 0
 fi
 
 # --- GESTIONE ARGOMENTI (CLI) ---
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        -i)                 ARGS+=("$2"); shift 2 ;; 
+        -i)                 ARGS+=("$2"); shift 2 ;;
         --dry-run)          DRY_RUN=true; shift ;;
         --no-snap)          SKIP_SNAPSHOT=true; shift ;;
         clean|--clean)      CLEAN_MODE=true; shift ;;
         ha|--ha)            HA_MODE=true; shift ;;
         -h|--help)          show_help ;;
-        *)                  ARGS+=("$1"); shift ;; 
+        *)                  ARGS+=("$1"); shift ;;
     esac
 done
 
 # Setup Home Assistant
 if [ "$HA_MODE" = true ]; then
     [ -f "/root/ha_secret.conf" ] && source /root/ha_secret.conf
-    C_INFO="" ; C_ERROR="" ; C_SUCCESS="" ; C_WARNING="" ; C_CYAN="" ; C_DEFAULT=""
+    C_RED="" ; C_GREEN="" ; C_YELLOW="" ; C_CYAN="" ; C_DEFAULT=""
 fi
 
 log_msg() { [ "$HA_MODE" = false ] && echo -e "${1}${C_DEFAULT}"; }
@@ -195,6 +199,33 @@ esegui_remoto() {
     local ID=$1
     local CMD=$2
     pct exec "$ID" -- bash -c "export LC_ALL=C.UTF-8 && $CMD" 2>/dev/null
+}
+
+# Ritorna 0 se lo stack è tra quelli critici (Tailscale/Termix)
+is_critical() {
+    local NAME="${1,,}"
+    local C
+    for C in $CRITICAL_STACKS; do
+        [[ "$NAME" == *"$C"* ]] && return 0
+    done
+    return 1
+}
+
+# Elenca le cartelle degli stack compose dentro un LXC
+trova_stacks_remoto() {
+    local ID=$1
+    esegui_remoto "$ID" "find $SCAN_ROOTS -mindepth 1 -maxdepth 2 -type f -regex \".*\(docker-compose\|compose\).y\(a\)?ml\" -print0 2>/dev/null | xargs -0 -I {} dirname {} | sort -u"
+}
+
+# Ritorna 0 se l'LXC (acceso) contiene almeno uno stack critico
+lxc_ha_critici() {
+    local ID=$1
+    [ "$(pct status $ID 2>/dev/null)" = "status: running" ] || return 1
+    local P
+    for P in $(trova_stacks_remoto "$ID"); do
+        is_critical "$(basename "$P")" && return 0
+    done
+    return 1
 }
 
 trova_lxc_ids() {
@@ -235,22 +266,60 @@ aggiorna_stack() {
     local CHECK=$(esegui_remoto "$ID" "[ -d \"$PATH_STACK\" ] && echo 'ok'")
     [ "$CHECK" != "ok" ] && return 0
     log_status "      Check $NOME_STACK..."
-    
+
     local RUNNING_BEFORE=$(esegui_remoto "$ID" "cd \"$PATH_STACK\" && docker compose ps --format '{{.Service}}' --filter \"status=running\" 2>/dev/null" | xargs)
     local PRE_IDS=$(esegui_remoto "$ID" "cd \"$PATH_STACK\" && docker compose ps -a -q | xargs -r docker inspect --format='{{.Image}}' 2>/dev/null | sed 's/sha256://g' | sort -u | xargs")
 
     if ! esegui_remoto "$ID" "cd \"$PATH_STACK\" && docker compose pull -q"; then
-        log_status "${C_RED}      ✖ Errore Pull su $NOME_STACK${C_DEFAULT}"; return 1 
+        log_status "${C_RED}      ✖ Errore Pull su $NOME_STACK${C_DEFAULT}"; return 1
     fi
-    
+
     local POST_IDS=$(esegui_remoto "$ID" "cd \"$PATH_STACK\" && docker compose config --images 2>/dev/null | xargs -r docker inspect --format='{{.Id}}' 2>/dev/null | sed 's/sha256://g' | sort -u | xargs")
 
     if [ -n "$POST_IDS" ] && [ "$PRE_IDS" != "$POST_IDS" ]; then
         log_status "${C_GREEN}      ✔ Aggiornamento trovato per $NOME_STACK!${C_DEFAULT}"
         if [ "$DRY_RUN" = true ]; then UPDATE_LOGS+=("✅ LXC $ID - $NOME_STACK: Disponibile (Dry Run)"); return 0; fi
 
-        local UP_OUT=$(esegui_remoto "$ID" "cd \"$PATH_STACK\" && docker compose up -d 2>&1")
-        if [ $? -eq 0 ]; then
+        local UP_OUT UP_RC
+        if is_critical "$NOME_STACK"; then
+            log_status "${C_YELLOW}      ⚠ Stack critico: avvio staccato dalla sessione${C_DEFAULT}"
+            # Esecuzione detached: sopravvive anche se la VPN cade durante la ricreazione
+            esegui_remoto "$ID" "cd \"$PATH_STACK\" && (setsid nohup sh -c 'docker compose up -d; sleep 5; docker compose up -d' >/tmp/critical_up.log 2>&1 </dev/null &)"
+
+            # Quanti servizi dovevano essere attivi (minimo 1)
+            local EXPECTED=$(echo "$RUNNING_BEFORE" | wc -w)
+            [ "${EXPECTED:-0}" -lt 1 ] && EXPECTED=1
+
+            # Attende la ripartenza con polling
+            local CHK=0 TRY
+            UP_RC=1
+            for TRY in $(seq 1 "$CRITICAL_WAIT_TRIES"); do
+                sleep 10
+                CHK=$(esegui_remoto "$ID" "cd \"$PATH_STACK\" && docker compose ps --status running -q | wc -l")
+                if [ "${CHK:-0}" -ge "$EXPECTED" ]; then UP_RC=0; break; fi
+            done
+
+            UP_OUT=$(esegui_remoto "$ID" "cat /tmp/critical_up.log")
+
+            if [ $UP_RC -ne 0 ]; then
+                # Ultimo tentativo di ripartenza
+                log_status "${C_YELLOW}      ↻ Ritento avvio di $NOME_STACK...${C_DEFAULT}"
+                esegui_remoto "$ID" "cd \"$PATH_STACK\" && docker compose up -d" >/dev/null 2>&1
+                sleep 10
+                CHK=$(esegui_remoto "$ID" "cd \"$PATH_STACK\" && docker compose ps --status running -q | wc -l")
+                [ "${CHK:-0}" -ge "$EXPECTED" ] && UP_RC=0
+            fi
+
+            if [ $UP_RC -ne 0 ]; then
+                log_status "${C_RED}      ✖ $NOME_STACK non ripartito${C_DEFAULT}"
+            fi
+        else
+            UP_OUT=$(esegui_remoto "$ID" "cd \"$PATH_STACK\" && docker compose up -d 2>&1")
+            UP_RC=$?
+        fi
+
+        if [ $UP_RC -eq 0 ]; then
+            # Ferma i servizi che erano spenti prima dell'aggiornamento
             local ALL_SERVICES=$(esegui_remoto "$ID" "cd \"$PATH_STACK\" && docker compose config --services 2>/dev/null")
             for SERVICE in $ALL_SERVICES; do
                 if [[ ! " $RUNNING_BEFORE " =~ " $SERVICE " ]]; then
@@ -260,7 +329,9 @@ aggiorna_stack() {
             local UPDATED_NAMES=$(echo "$UP_OUT" | grep -E 'Recreated|Started|Created' | sed -E 's/.*Container //;s/ .*//' | sort -u | paste -sd ", " -)
             UPDATE_LOGS+=("✅ LXC $ID - $NOME_STACK: ${UPDATED_NAMES:-Aggiornato}")
             return 0
-        else return 1; fi
+        else
+            return 1
+        fi
     else
         UPDATE_LOGS+=("🟡 LXC $ID - $NOME_STACK: Nessuna modifica.")
         return 0
@@ -273,39 +344,65 @@ processa_lxc() {
     local NOME=$(pct config $ID | grep 'hostname' | awk '{print $2}' || echo "LXC $ID")
     log_msg "--------------------------------------------------------"
     log_msg "${C_CYAN}#### PROCESSO LXC $ID ($NOME) ####${C_DEFAULT}"
-    
+
     [ "$(pct status $ID)" != "status: running" ] && { log_status "LXC non in esecuzione."; return 0; }
-    
+
     local SNAP_NAME=""
     if [ "$SKIP_SNAPSHOT" = false ]; then
         SNAP_NAME=$(crea_snapshot $ID)
         [ $? -ne 0 ] && return 1
     fi
-    
+
     local FAILED=false
+    local CRIT_FAILED=false
+
+    # 1) Dockge (se non è uno stack critico)
     for D_PATH in $DOCKGE_PATHS; do
         if ! aggiorna_stack "$ID" "$D_PATH" "Dockge"; then FAILED=true; break; fi
     done
-    
-    # Aggiorna altri Stack
+
+    # 2) Altri stack: prima i normali, poi i critici per ultimi
     if [ "$FAILED" = false ]; then
-        local STACKS=$(esegui_remoto "$ID" "find $SCAN_ROOTS -mindepth 1 -maxdepth 2 -type f -regex \".*\(docker-compose\|compose\).y\(a\)?ml\" -print0 2>/dev/null | xargs -0 -I {} dirname {} | sort -u")
+        local STACKS=$(trova_stacks_remoto "$ID")
+
+        local NORMAL="" CRIT="" P
         for P in $STACKS; do
             local SKIP_S=false
             for D in $DOCKGE_PATHS; do [[ "$P" == "$D"* ]] && SKIP_S=true; done
             [ "$SKIP_S" = true ] && continue
+            if is_critical "$(basename "$P")"; then CRIT+="$P "; else NORMAL+="$P "; fi
+        done
+
+        # Stack normali: un errore innesca il rollback
+        for P in $NORMAL; do
             if ! aggiorna_stack "$ID" "$P" "$(basename "$P")"; then FAILED=true; break; fi
         done
+
+        # Stack critici: nessun rollback (la connessione può cadere senza che sia un vero errore)
+        if [ "$FAILED" = false ]; then
+            for P in $CRIT; do
+                if ! aggiorna_stack "$ID" "$P" "$(basename "$P")"; then
+                    CRIT_FAILED=true
+                    UPDATE_LOGS+=("⚠️ LXC $ID - $(basename "$P"): non ripartito, controlla manualmente")
+                fi
+            done
+        fi
     fi
 
-    # Gestione Esito
+    # Gestione esito
     if [ "$FAILED" = true ]; then
         [ -n "$SNAP_NAME" ] && esegui_rollback "$ID" "$SNAP_NAME"
         UPDATE_LOGS+=("❌ LXC $ID - Errore durante l'aggiornamento")
         return 1
     fi
-    
-    # Pulizia Snapshot post-aggiornamento riuscito
+
+    # Se un critico è fallito mantengo lo snapshot per un eventuale rollback manuale
+    if [ "$CRIT_FAILED" = true ]; then
+        log_status "${C_YELLOW}      Snapshot mantenuto per rollback manuale: $SNAP_NAME${C_DEFAULT}"
+        return 1
+    fi
+
+    # Pulizia snapshot post-aggiornamento riuscito
     if [ "$DRY_RUN" = false ]; then
         if [ "$CLEAN_MODE" = true ]; then
             log_status "${C_YELLOW}      Pulizia totale snapshot temporanei...${C_DEFAULT}"
@@ -315,7 +412,7 @@ processa_lxc() {
             local OLD_SNAPS=$(pct listsnapshot $ID | awk '{print $2}' | grep "^$SNAP_PREFIX" | grep -v "$SNAP_NAME" || true)
             for OS in $OLD_SNAPS; do pct delsnapshot $ID $OS &>/dev/null; done
         fi
-        
+
         # Pulizia immagini Docker orfane
         esegui_remoto "$ID" "docker image prune -af" >/dev/null
     fi
@@ -327,7 +424,15 @@ processa_lxc() {
 LXC_IDS=$(trova_lxc_ids "${ARGS[@]}")
 [ -z "$LXC_IDS" ] && { echo "Nessun LXC trovato."; exit 1; }
 
-for ID in $LXC_IDS; do 
+# Ordina: prima gli LXC senza stack critici, per ultimi quelli con Tailscale/Termix/WireGuard
+LXC_NORMAL=""
+LXC_CRIT=""
+for ID in $LXC_IDS; do
+    if lxc_ha_critici "$ID"; then LXC_CRIT+="$ID "; else LXC_NORMAL+="$ID "; fi
+done
+[ -n "$LXC_CRIT" ] && log_msg "${C_YELLOW}LXC con stack critici (processati per ultimi): $LXC_CRIT${C_DEFAULT}"
+
+for ID in $LXC_NORMAL $LXC_CRIT; do
     processa_lxc "$ID"
 done
 
@@ -338,6 +443,8 @@ for ENTRY in "${UPDATE_LOGS[@]}"; do
     if [[ "$ENTRY" == "✅"* ]]; then
         REPORT_TEXT+="${ENTRY}\n"
         ((UPDATED_COUNT++))
+    elif [[ "$ENTRY" == "⚠️"* || "$ENTRY" == "❌"* ]]; then
+        REPORT_TEXT+="${ENTRY}\n"
     fi
 done
 
